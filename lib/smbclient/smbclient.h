@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009 - 2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2009 - 2020 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -24,7 +24,7 @@
 #ifndef SMBCLIENT_H_8C21E785_0577_44E0_8CA1_8577A1010DF0
 #define SMBCLIENT_H_8C21E785_0577_44E0_8CA1_8577A1010DF0
 
-#include <Availability.h>
+#include <os/availability.h>
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -123,11 +123,13 @@ __OSX_AVAILABLE_STARTING(__MAC_10_7, __IPHONE_NA)
 /*! Only connect as guest. */
 #define kSMBOptionUseGuestOnlyAuth		0x00000020
 /*! Only connect as anonymous. */
-#define kSMBOptionUseAnonymousOnlyAuth    0x00000040
+#define kSMBOptionUseAnonymousOnlyAuth  0x00000040
 /*! Requesting hifi mode */
 #define kSMBOptionRequestHiFi           0x00000080
 /*! Create an authenticated session connection, don't tree connect. */
 #define kSMBOptionSessionOnly			0x00010000
+/*! Force Session Encryption */
+#define kSMBOptionSessionEncrypt        0x00000100
 
 #define kSMBOptionOnlyAuthMask			(kSMBOptionUseGuestOnlyAuth | \
 										kSMBOptionUseAnonymousOnlyAuth)
@@ -179,6 +181,8 @@ __OSX_AVAILABLE_STARTING(__MAC_10_7, __IPHONE_NA)
 #define kSMBHighFidelityMount           0x00000020
 #define kSMBDataCacheOffMount           0x00000040
 #define kSMBMDataCacheOffMount          0x00000080
+#define kSMBSessionEncryptMount         0x00000100
+#define kSMBShareEncryptMount           0x00000200
 
 /*!
  * @function SMBOpenServerWithMountPoint
@@ -288,12 +292,14 @@ typedef struct SMBShareAttributes
     uint32_t    session_hflags2;
     uint32_t    session_smb1_caps;
     uint32_t    session_smb2_caps;
+    uint32_t    session_encrypt_cipher;
     uint32_t    ss_flags;
     uint32_t    ss_type;
     uint32_t    ss_caps;
     uint32_t    ss_attrs;
     uint16_t	ss_fstype;
     char		server_name[kMaxSrvNameLen];
+    char        snapshot_time[32];
 } SMBShareAttributes;
 
 /*!
@@ -310,6 +316,56 @@ SMBGetShareAttributes(
         SMBHANDLE	inConnection,
         void *outAttrs)
 __OSX_AVAILABLE_STARTING(__MAC_10_9, __IPHONE_NA)
+;
+
+/*!
+ * @function SMBGetMultichannelProperties
+ * @abstract Return Multi-Channel Status.
+ * @param inConnection A SMBHANDLE created by SMBOpenServerEx.
+ * @param outAttrs is of the type SMBMultiChannelStatus and contains
+ * multichannel information
+ * @result Returns an NTSTATUS error code.
+ */
+SMBCLIENT_EXPORT
+NTSTATUS
+SMBGetMultichannelProperties(
+                      SMBHANDLE    inConnection,
+                      void *outAttrs)
+API_AVAILABLE(macos(11.3))
+;
+
+/*!
+ * @function SMBGetNicInfoProperties
+ * @abstract Return info about the server's or client's network interfaces.
+ * @param inConnection A SMBHANDLE created by SMBOpenServerEx.
+ * @param outAttrs is of the type smbioc_nic_info and contains
+ * information about the network interface
+ * @param inClientOrServer flag to deternime whioch interfaces to return
+ * @result Returns an NTSTATUS error code.
+ */
+SMBCLIENT_EXPORT
+NTSTATUS
+SMBGetNicInfoProperties(
+                      SMBHANDLE    inConnection,
+                      void *outAttrs,
+                      uint8_t inClientOrServer)
+API_AVAILABLE(macos(11.3))
+;
+
+/*!
+ * @function SMBGetMultichannelSessionInfoProperties
+ * @abstract Return multichannel info about the session.
+ * @param inConnection A SMBHANDLE created by SMBOpenServerEx.
+ * @param outAttrs is of the type smbioc_session_info and contains
+ * information about the session
+ * @result Returns an NTSTATUS error code.
+ */
+SMBCLIENT_EXPORT
+NTSTATUS
+SMBGetMultichannelSessionInfoProperties(
+                      SMBHANDLE    inConnection,
+                      void *outAttrs)
+API_AVAILABLE(macos(11.3))
 ;
 
 /*!
@@ -596,6 +652,27 @@ SMBConvertFromUTF8ToUTF16(
 	   size_t maxLen,
 	   uint64_t options)
 __OSX_AVAILABLE_STARTING(__MAC_10_7, __IPHONE_NA)
+;
+
+/*!
+ * @function SMBListSnapshot (Only for SMB v2/3)
+ * @abstract Perform an IOCTL of  FSCTL_SRV_ENUMERATE_SNAPSHOTS operation on a  file/dir.
+ * @param inConnection A SMBHANDLE created by SMBOpenServerEX.
+ * @param path Path to a file or dir on the share to list the snapshots for.
+ * @param outBuffer Output buffer to return Snapshot strings in UTF16 format of "@GMT-YYYY.MM.DD-HH.MM.SS" with a terminating NULL.
+ * @param outBufferSize Output buffer size.
+ * @param bytesRead Returned number of bytes.
+ * @result Returns an NTSTATUS error code.
+ */
+SMBCLIENT_EXPORT
+NTSTATUS
+SMBListSnapshots(
+    SMBHANDLE inConnection,
+    const char *path,
+    void *outBuffer,
+    size_t outBufferSize,
+    size_t *bytesRead)
+API_AVAILABLE(macos(11.3))
 ;
 
 

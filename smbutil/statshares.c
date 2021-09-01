@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 - 2013 Apple Inc. All rights reserved
+ * Copyright (c) 2012 - 2020 Apple Inc. All rights reserved
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -36,12 +36,16 @@
 #include <sys/mount.h>
 #include <sys/errno.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/socket.h>
 #include <err.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <strings.h>
 #include <stdlib.h>
 #include <sysexits.h>
+#include <net/if.h>
+
 
 #include <smbclient/smbclient.h>
 #include <smbclient/smbclient_internal.h>
@@ -62,15 +66,13 @@
 #include <json_support.h>
 
 
-enum OutputFormat { None = 0, Json = 1 };
-
 CFMutableArrayRef smbShares = NULL;
 
 
 /*
  * Make a copy of the name and if request unpercent escape the name
  */
-static char *
+char *
 get_share_name(const char *name)
 {
 	char *newName = strdup(name);
@@ -156,7 +158,7 @@ print_if_attr_chk_ret(FILE *fp, uint64_t flag, uint64_t of_type,
 }
 
 static void
-print_delimeter(FILE *fp, enum OutputFormat format)
+print_delimiter(FILE *fp, enum OutputFormat format)
 {
     if (format == None) {
         fprintf(fp, "\n------------------------------------------------");
@@ -168,14 +170,25 @@ static void
 interpret_and_display(char *share, SMBShareAttributes *sattrs)
 {
     int ret = 0;
-    
+    time_t local_time;
+
     /* share name and server */
     fprintf(stdout, "%-30s\n", share);
     fprintf(stdout, "%-30s%-30s%s\n", "", "SERVER_NAME", sattrs->server_name);
     
     /* user who mounted this share */
     fprintf(stdout, "%-30s%-30s%d\n", "","USER_ID", sattrs->session_uid);
-    
+
+    if (sattrs->session_misc_flags & SMBV_MNT_SNAPSHOT) {
+        fprintf(stdout, "%-30s%-30s%s\n", "", "SNAPSHOT_TIME", sattrs->snapshot_time);
+
+        /* Convert the @GMT token to local time */
+        local_time = SMBConvertGMT(sattrs->snapshot_time);
+        if (local_time != 0) {
+            fprintf(stdout, "%-30s%-30s%s", "", "SNAPSHOT_TIME_LOCAL", ctime(&local_time));
+        }
+    }
+
     /* smb negotiate */
     print_if_attr(stdout, sattrs->session_misc_flags,
                   SMBV_NEG_SMB1_ENABLED, "SMB_NEGOTIATE",
@@ -192,8 +205,11 @@ interpret_and_display(char *share, SMBShareAttributes *sattrs)
     
     /* smb version */
     print_if_attr(stdout, sattrs->session_flags,
+                  SMBV_SMB311, "SMB_VERSION",
+                  "SMB_3.1.1", &ret);
+    print_if_attr(stdout, sattrs->session_flags,
                   SMBV_SMB302, "SMB_VERSION",
-                  "SMB_3.02", &ret);
+                  "SMB_3.0.2", &ret);
     print_if_attr(stdout, sattrs->session_flags,
                   SMBV_SMB30, "SMB_VERSION",
                   "SMB_3.0", &ret);
@@ -207,7 +223,54 @@ interpret_and_display(char *share, SMBShareAttributes *sattrs)
                   0, "SMB_VERSION",
                   "SMB_1", &ret);
     
-    /*
+    /* SMB 3.1.1 Encryption Algorithms enabled */
+    print_if_attr(stdout, sattrs->session_misc_flags,
+                  SMBV_ENABLE_AES_128_CCM, "SMB_ENCRYPT_ALGORITHMS",
+                  "AES_128_CCM_ENABLED", &ret);
+    print_if_attr(stdout, sattrs->session_misc_flags,
+                  SMBV_ENABLE_AES_128_GCM, "SMB_ENCRYPT_ALGORITHMS",
+                  "AES_128_GCM_ENABLED", &ret);
+    print_if_attr(stdout, sattrs->session_misc_flags,
+                  SMBV_ENABLE_AES_256_CCM, "SMB_ENCRYPT_ALGORITHMS",
+                  "AES_256_CCM_ENABLED", &ret);
+    print_if_attr(stdout, sattrs->session_misc_flags,
+                  SMBV_ENABLE_AES_256_GCM, "SMB_ENCRYPT_ALGORITHMS",
+                  "AES_256_GCM_ENABLED", &ret);
+    
+    /* Current in use encryption algorithm */
+    switch (sattrs->session_encrypt_cipher) {
+        case 0:
+            print_if_attr(stdout, 1, 1, "SMB_CURR_ENCRYPT_ALGORITHM",
+                          "OFF", &ret);
+            break;
+
+        case 1:
+            print_if_attr(stdout, 1, 1, "SMB_CURR_ENCRYPT_ALGORITHM",
+                          "AES-128-CCM", &ret);
+            break;
+            
+        case 2:
+            print_if_attr(stdout, 1, 1, "SMB_CURR_ENCRYPT_ALGORITHM",
+                          "AES-128-GCM", &ret);
+            break;
+
+        case 3:
+            print_if_attr(stdout, 1, 1, "SMB_CURR_ENCRYPT_ALGORITHM",
+                          "AES-256-CCM", &ret);
+            break;
+            
+        case 4:
+            print_if_attr(stdout, 1, 1, "SMB_CURR_ENCRYPT_ALGORITHM",
+                          "AES-256-GCM", &ret);
+            break;
+
+        default:
+            print_if_attr_chk_ret(stdout, 0, 0, "SMB_CURR_ENCRYPT_ALGORITHM",
+                                  "UNKNOWN", &ret);
+            break;
+    }
+    
+   /*
      * Note: No way to get file system type since the type is determined at
      * mount time and not just by a Tree Connect.  If we ever wanted to display
      * the file system type, we would probably need an IOCTL to the mount 
@@ -289,6 +352,15 @@ interpret_and_display(char *share, SMBShareAttributes *sattrs)
     print_if_attr(stdout, sattrs->session_misc_flags,
                   SMBV_MNT_HIGH_FIDELITY, "HIGH_FIDELITY",
                   "TRUE", &ret);
+    print_if_attr(stdout, sattrs->session_misc_flags,
+                  SMBV_MNT_DATACACHE_OFF, "DATA_CACHING_OFF",
+                  "TRUE", &ret);
+    print_if_attr(stdout, sattrs->session_misc_flags,
+                  SMBV_MNT_MDATACACHE_OFF, "META_DATA_CACHING_OFF",
+                  "TRUE", &ret);
+    print_if_attr(stdout, sattrs->session_misc_flags,
+                  SMBV_MNT_SNAPSHOT, "SNAPSHOT_MOUNT",
+                  "TRUE", &ret);
 
     print_if_attr_chk_ret(stdout, 0,
                           0, "SERVER_CAPS",
@@ -332,14 +404,21 @@ static CFMutableDictionaryRef
 display_json(char *share, SMBShareAttributes *sattrs)
 {
     int res = 0;
-    char buf[20];
+    char buf[32];
+    time_t local_time;
+
     CFMutableDictionaryRef dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     if (dict == NULL) {
         fprintf(stderr, "CFDictionaryCreateMutable failed\n");
         return NULL;
     }
-    CFMutableArrayRef arr =  CFArrayCreateMutable(NULL, 3, &kCFTypeArrayCallBacks);
+    CFMutableArrayRef arr = CFArrayCreateMutable(NULL, 3, &kCFTypeArrayCallBacks);
     if (arr == NULL) {
+        fprintf(stderr, "CFArrayCreateMutable failed\n");
+        return NULL;
+    }
+    CFMutableArrayRef arr2 = CFArrayCreateMutable(NULL, 3, &kCFTypeArrayCallBacks);
+    if (arr2 == NULL) {
         fprintf(stderr, "CFArrayCreateMutable failed\n");
         return NULL;
     }
@@ -352,6 +431,18 @@ display_json(char *share, SMBShareAttributes *sattrs)
     sprintf(buf, "%d", sattrs->session_uid);
     json_add_str(dict, "USER_ID", buf);
     
+    if (sattrs->session_misc_flags & SMBV_MNT_SNAPSHOT) {
+        json_add_str(dict, "SNAPSHOT_TIME", sattrs->snapshot_time);
+
+        /* Convert the @GMT token to local time */
+        local_time = SMBConvertGMT(sattrs->snapshot_time);
+        if (local_time != 0) {
+            sprintf(buf, "%s", ctime(&local_time));
+            buf[strlen(buf) - 1] = 0x00; /* strip off the newline at end */
+            json_add_str(dict, "SNAPSHOT_TIME_LOCAL", buf);
+        }
+    }
+
     /* smb negotiate */
     if (sattrs->session_misc_flags & SMBV_NEG_SMB1_ENABLED) {
         CFArrayAppendValue(arr, CFSTR("SMBV_NEG_SMB1_ENABLED"));
@@ -369,8 +460,12 @@ display_json(char *share, SMBShareAttributes *sattrs)
 
     /* smb version */
     res = 0;
-    if (sattrs->session_flags & SMBV_SMB302) {
-        CFDictionarySetValue(dict, CFSTR("SMB_VERSION"), CFSTR("SMB_3.02"));
+    if (sattrs->session_flags & SMBV_SMB311) {
+        CFDictionarySetValue(dict, CFSTR("SMB_VERSION"), CFSTR("SMB_3.1.1"));
+        res = 1;
+    }
+    if (!res && (sattrs->session_flags & SMBV_SMB302)) {
+        CFDictionarySetValue(dict, CFSTR("SMB_VERSION"), CFSTR("SMB_3.0.2"));
         res = 1;
     }
     if (!res && (sattrs->session_flags & SMBV_SMB30)) {
@@ -389,6 +484,54 @@ display_json(char *share, SMBShareAttributes *sattrs)
         CFDictionarySetValue(dict, CFSTR("SMB_VERSION"), CFSTR("SMB_1"));
     }
     
+    /* SMB 3.1.1 Encryption Algorithms enabled */
+    if (sattrs->session_misc_flags & SMBV_ENABLE_AES_128_CCM) {
+        CFArrayAppendValue(arr2, CFSTR("AES_128_CCM_ENABLED"));
+    }
+    if (sattrs->session_misc_flags & SMBV_ENABLE_AES_128_GCM) {
+        CFArrayAppendValue(arr2, CFSTR("AES_128_GCM_ENABLED"));
+    }
+    if (sattrs->session_misc_flags & SMBV_ENABLE_AES_256_CCM) {
+        CFArrayAppendValue(arr2, CFSTR("AES_256_CCM_ENABLED"));
+    }
+    if (sattrs->session_misc_flags & SMBV_ENABLE_AES_256_GCM) {
+        CFArrayAppendValue(arr2, CFSTR("AES_256_GCM_ENABLED"));
+    }
+    CFDictionarySetValue(dict, CFSTR("SMB_ENCRYPT_ALGORITHMS"), arr2);
+
+    /* Current in use encryption algorithm */
+    switch (sattrs->session_encrypt_cipher) {
+        case 0:
+            CFDictionarySetValue(dict, CFSTR("SMB_CURR_ENCRYPT_ALGORITHM"),
+                                 CFSTR("OFF"));
+            break;
+
+        case 1:
+            CFDictionarySetValue(dict, CFSTR("SMB_CURR_ENCRYPT_ALGORITHM"),
+                                 CFSTR("AES-128-CCM"));
+            break;
+            
+        case 2:
+            CFDictionarySetValue(dict, CFSTR("SMB_CURR_ENCRYPT_ALGORITHM"),
+                                 CFSTR("AES-128-GCM"));
+            break;
+
+        case 3:
+            CFDictionarySetValue(dict, CFSTR("SMB_CURR_ENCRYPT_ALGORITHM"),
+                                 CFSTR("AES-256-CCM"));
+            break;
+            
+        case 4:
+            CFDictionarySetValue(dict, CFSTR("SMB_CURR_ENCRYPT_ALGORITHM"),
+                                 CFSTR("AES-256-GCM"));
+            break;
+
+        default:
+            CFDictionarySetValue(dict, CFSTR("SMB_CURR_ENCRYPT_ALGORITHM"),
+                                 CFSTR("UNKNOWN"));
+            break;
+    }
+ 
     /*
      * Note: No way to get file system type since the type is determined at
      * mount time and not just by a Tree Connect.  If we ever wanted to display
@@ -481,6 +624,18 @@ display_json(char *share, SMBShareAttributes *sattrs)
     }
     if (sattrs->session_misc_flags & SMBV_MNT_HIGH_FIDELITY) {
         CFDictionarySetValue(dict, CFSTR("HIGH_FIDELITY"), CFSTR("TRUE"));
+        res = 1;
+    }
+    if (sattrs->session_misc_flags & SMBV_MNT_DATACACHE_OFF) {
+        CFDictionarySetValue(dict, CFSTR("DATA_CACHING_OFF"), CFSTR("TRUE"));
+        res = 1;
+    }
+    if (sattrs->session_misc_flags & SMBV_MNT_MDATACACHE_OFF) {
+        CFDictionarySetValue(dict, CFSTR("META_DATA_CACHING_OFF"), CFSTR("TRUE"));
+        res = 1;
+    }
+    if (sattrs->session_misc_flags & SMBV_MNT_SNAPSHOT) {
+        CFDictionarySetValue(dict, CFSTR("SNAPSHOT_MOUNT"), CFSTR("TRUE"));
         res = 1;
     }
 
@@ -661,7 +816,7 @@ stat_all_shares(enum OutputFormat format)
             continue;
 
         if (!first) {
-            print_delimeter(stdout, format);
+            print_delimiter(stdout, format);
         }
 
         status = stat_share(fs->f_mntonname, format) ;

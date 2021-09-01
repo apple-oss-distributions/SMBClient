@@ -2,7 +2,7 @@
  * Copyright (c) 2000-2001 Boris Popov
  * All rights reserved.
  *
- * Portions Copyright (C) 2001 - 2011 Apple Inc. All rights reserved.
+ * Portions Copyright (C) 2001 - 2020 Apple Inc. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -60,6 +60,9 @@
 #define kHighFidelityMountKey CFSTR("SMBHighFidelityMount") /* Also an Open option! */
 #define kDataCacheOffMountKey CFSTR("SMBDataCacheOffMount")
 #define kMDataCacheOffMountKey CFSTR("SMBMDataCacheOffMount")
+#define kSnapshotTimeKey CFSTR("SMBSnapshotTimeMount")
+#define kSessionEncryptionKey CFSTR("SMBSessionEncryption") /* Also an Open option! */
+#define kShareEncryptionKey CFSTR("SMBShareEncryption")
 
 /* This one should be defined in NetFS.h, but we want it to be private */
 #define kTimeMachineMountKey CFSTR("TimeMachineMount")
@@ -133,6 +136,8 @@ struct smb_ctx {
 #define SMBCF_MATCH_DNS         0x00000080	/* Check for already mounted servers using dns name */
 #define SMBCF_FORCE_NEW_SESSION 0x00000100  /* Force New Session was used during the Open Session */
 #define SMBCF_HIFI_REQUESTED    0x00000200  /* HiFi mode is being requested */
+#define SMBCF_SESSION_ENCRYPT   0x00000400  /* Force session encryption */
+#define SMBCF_SHARE_ENCRYPT     0x00000800  /* Force share encryption */
 #define SMBCF_EXPLICITPWD		0x00010000	/* The password was set by the url */
 
 #define SMBCF_CONNECT_STATE	SMBCF_CONNECTED | SMBCF_AUTHORIZED | SMBCF_SHARE_CONN

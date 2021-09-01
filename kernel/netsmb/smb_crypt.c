@@ -66,6 +66,7 @@
 #include <corecrypto/ccsha2.h>
 #include <corecrypto/cccmac.h>
 #include <corecrypto/ccnistkdf.h>
+#include <libkern/crypto/sha2.h>
 
 
 #define SMBSIGLEN (8)
@@ -438,6 +439,14 @@ void smb_reset_sig(struct smb_session *sessionp)
     
     sessionp->session_mackey = NULL;
     sessionp->session_mackeylen = 0;
+    
+    if (sessionp->full_session_mackey != NULL) {
+        SMB_FREE(sessionp->full_session_mackey, M_SMBTEMP);
+    }
+    
+    sessionp->full_session_mackey = NULL;
+    sessionp->full_session_mackeylen = 0;
+
     sessionp->session_smb3_signing_key_len = 0;
     sessionp->session_seqno = 0;
 }
@@ -686,12 +695,6 @@ smb2_rq_sign(struct smb_rq *rqp)
     if (sessionp == NULL) {
         SMBERROR("sessionp is NULL\n");
         return  (EINVAL);
-    }
-    
-    /* Is signing required for the command? */
-    if ((rqp->sr_command == SMB2_SESSION_SETUP) ||
-         (rqp->sr_command == SMB2_NEGOTIATE)) {
-        return (0);
     }
 
     /* 
@@ -973,11 +976,13 @@ smb2_rq_verify(struct smb_rq *rqp, struct mdchain *mdp, uint8_t *signature)
     
     if ((sessionp->session_mackey == NULL) ||
         (rqp->sr_command == SMB2_OPLOCK_BREAK) ||
-        ((rqp->sr_command == SMB2_SESSION_SETUP) && !(rqp->sr_rspflags & SMB2_FLAGS_SIGNED))) {
+        (rqp->sr_command == SMB2_NEGOTIATE) ||
+        (rqp->sr_command == SMB2_SESSION_SETUP)) {
         /*
          * Don't verify signature if we don't have a session key from gssd yet.
-         * Don't verify signature if a SessionSetup reply that hasn't
-         * been signed yet (server only signs the final SessionSetup reply).
+         * Don't verify negotiate messages - are never signed
+         * Don't verify signed SessionSetup replies as they will be checked
+         * later after deriving the SMB3 keys.
          */
 		return (0);
     }
@@ -1013,7 +1018,7 @@ smb2_rq_verify(struct smb_rq *rqp, struct mdchain *mdp, uint8_t *signature)
  */
 
 static void
-smb3_get_signature(struct smb_session *sessionp,
+smb3_get_signature(uint8_t *key, uint32_t keylen,
 				   struct mbchain *mbp,
 				   struct mdchain *mdp,
 				   size_t packet_len,
@@ -1049,8 +1054,8 @@ smb3_get_signature(struct smb_session *sessionp,
 		return;
 	}
 	
-	if (sessionp->session_smb3_signing_key_len < SMB3_KEY_LEN) {
-		SMBERROR("smb3 keylen %u\n", sessionp->session_smb3_signing_key_len);
+	if (keylen < SMB3_KEY_LEN) {
+		SMBERROR("smb3 keylen %u\n", keylen);
 		return;
 	}
 	
@@ -1099,7 +1104,7 @@ smb3_get_signature(struct smb_session *sessionp,
 		
 		/* Sign entire packet in one call */
 		error = cccmac_one_shot_generate(ccmode,
-										 SMB3_KEY_LEN, sessionp->session_smb3_signing_key,
+										 SMB3_KEY_LEN, key,
 										 malloc_size, block,
 										 CMAC_BLOCKSIZE, mac);
 		if (error) {
@@ -1115,7 +1120,7 @@ smb3_get_signature(struct smb_session *sessionp,
 		
 		/* Init the cipher */
 		cccmac_mode_decl(ccmode, cmac);
-		error = cccmac_init(ccmode, cmac, SMB3_KEY_LEN, sessionp->session_smb3_signing_key);
+		error = cccmac_init(ccmode, cmac, SMB3_KEY_LEN, key);
 		if (error) {
 			SMBERROR("cccmac_init failed %d \n", error);
 			goto out;
@@ -1228,10 +1233,12 @@ smb3_verify(struct smb_rq *rqp, struct mdchain *mdp,
     int result;
     uint8_t *sig_ptr = NULL;
     size_t sig_bytes_remaining;
-    uint8_t reply_signature[SMB2SIGLEN];
+    uint8_t reply_signature[SMB2SIGLEN] = {0};
 	size_t reply_len;
 	mbuf_t mb_temp;
-	
+    uint8_t *key = NULL;
+    uint32_t keylen = 0;
+
     if (sessionp == NULL) {
         SMBERROR("sessionp is NULL\n");
         return  (EINVAL);
@@ -1241,7 +1248,7 @@ smb3_verify(struct smb_rq *rqp, struct mdchain *mdp,
         SMBERROR("SMB3 signing key len too small: %u\n", sessionp->session_smb3_signing_key_len);
         return (EAUTH);
     }
-	
+    
     /*
      * Handling replies is more difficult because the reply could be a
      * compound reply. In that case, its one mbuf chain with multiple replies.
@@ -1386,10 +1393,24 @@ smb3_verify(struct smb_rq *rqp, struct mdchain *mdp,
 		}
 	}
 
-	/* Calculate reply's signature */
+    /*
+     * Calculate reply's signature
+     *
+     * For alternate channels, all messages prior to the last Session Setup
+     * reply with status of SUCCESS are signed with the main channel signing
+     * key. The last Session Setup and onward are signed with the alt channel
+     * signing key.
+     */
 	/*SMBERROR("SMB3 verify signature: mid %llu NextCmd %d\n",
 			 rqp->sr_messageid, nextCmdOffset);*/
-	smb3_get_signature(sessionp, NULL, mdp, reply_len,
+    if ((rqp->sr_iod) && (rqp->sr_iod->iod_flags & SMBIOD_USE_CHANNEL_KEYS)) {
+        key    = rqp->sr_iod->iod_smb3_signing_key;
+        keylen = rqp->sr_iod->iod_smb3_signing_key_len;
+    } else {
+        key    = sessionp->session_smb3_signing_key;
+        keylen = sessionp->session_smb3_signing_key_len;
+    }
+	smb3_get_signature(key, keylen, NULL, mdp, reply_len,
 					   reply_signature, SMB2SIGLEN);
 	
     /*
@@ -1411,10 +1432,104 @@ smb3_verify(struct smb_rq *rqp, struct mdchain *mdp,
                  signature[8], signature[9], signature[10], signature[11],
                  signature[12], signature[13], signature[14], signature[15]);
     }
-    
+
 	return (result);
 }
 
+int
+smb3_verify_session_setup(struct smb_session *sessionp, struct smbiod *iod,
+                          uint8_t *sess_setup_reply, size_t sess_setup_len)
+{
+    char reply_signature[SMB2SIGLEN] = {0};
+    char signature[SMB2SIGLEN] = {0};
+    uint8_t *key = NULL;
+    uint32_t keylen = 0;
+    u_char mac[CMAC_BLOCKSIZE];
+    const struct ccmode_cbc *ccmode = ccaes_cbc_encrypt_mode();
+    int error;
+    
+    /*
+     * This function is used for to just verify the signature of the last
+     * session setup reply that is signed due to SMB v3.1.1 pre auth integrity
+     * check or SMB 3.x.x multichannel.
+     */
+    if ((sessionp == NULL) || (iod == NULL)) {
+        SMBERROR("sessionp or iod are null? \n");
+        return(EAUTH);
+    }
+
+    if ((sess_setup_reply == NULL) || (sess_setup_len == 0)) {
+        SMBERROR("sess_setup_reply is null or sess_setup_len is 0 \n");
+        return(EAUTH);
+    }
+    
+    if (sess_setup_len < (SMB2SIGOFF + SMB2SIGLEN + 1)) {
+        SMBERROR("sess_setup_reply is too small %zu \n", sess_setup_len);
+        return(EAUTH);
+    }
+    
+    if (iod->iod_flags & SMBIOD_USE_CHANNEL_KEYS) {
+        key = iod->iod_smb3_signing_key;
+        keylen = iod->iod_smb3_signing_key_len;
+    }
+    else {
+        key = sessionp->session_smb3_signing_key;
+        keylen = sessionp->session_smb3_signing_key_len;
+    }
+
+    if (key == NULL) {
+        SMBERROR("SMB3 key is NULL \n");
+        return(EAUTH);
+    }
+
+    if (keylen < SMB3_KEY_LEN) {
+        SMBERROR("SMB3 keylen too small %u\n", keylen);
+        return(EAUTH);
+    }
+    
+    /* Save the reply's signature */
+    bcopy(sess_setup_reply + SMB2SIGOFF, signature, SMB2SIGLEN);
+    
+    /* Zero out the reply's signature */
+    bzero(sess_setup_reply + SMB2SIGOFF, SMB2SIGLEN);
+    
+    /* Calculate signature in one call */
+    error = cccmac_one_shot_generate(ccmode,
+                                     SMB3_KEY_LEN, key,
+                                     sess_setup_len, sess_setup_reply,
+                                     CMAC_BLOCKSIZE, mac);
+    if (error) {
+        SMBERROR("cccmac_one_shot_generate failed %d \n", error);
+        return(EAUTH);
+    }
+    
+    /* Copy first 16 bytes of the HMAC hash into the reply_signature */
+    bcopy(mac, reply_signature, SMB2SIGLEN);
+
+    /*
+     * Finally, verify the signature.
+     */
+    error = cc_cmp_safe(SMB2SIGLEN, signature, reply_signature);
+    if (error) {
+        SMBDEBUG("SMB3 signature mismatch on last session setup reply \n");
+        
+        SMBDEBUG("SigCalc: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                 reply_signature[0], reply_signature[1], reply_signature[2], reply_signature[3],
+                 reply_signature[4], reply_signature[5], reply_signature[6], reply_signature[7],
+                 reply_signature[8], reply_signature[9], reply_signature[10], reply_signature[11],
+                 reply_signature[12], reply_signature[13], reply_signature[14], reply_signature[15]);
+        
+        SMBDEBUG("SigExpected: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                 signature[0], signature[1], signature[2],signature[3],
+                 signature[4], signature[5], signature[6], signature[7],
+                 signature[8], signature[9], signature[10], signature[11],
+                 signature[12], signature[13], signature[14], signature[15]);
+        
+        error = EAUTH;
+    }
+
+    return (error);
+}
 
 /*
  * SMB 3 Sign a single request with AES-CMAC-128
@@ -1453,7 +1568,19 @@ smb3_sign(struct smb_rq *rqp)
 
 	/* Sign the request */
 	//SMBERROR("Send: mid %lld cmd %hu \n", rqp->sr_messageid, rqp->sr_command);
-	smb3_get_signature(sessionp, mbp, NULL, request_len,
+    uint8_t *key = NULL;
+    uint32_t keylen = 0;
+    // For alternate channel, all messages prior to "session-setup-response with status SUCCESS"
+    // are signed by the main-channel keys, while the "session-setup-response with status SUCCESS"
+    // message and onward are signed with the alternate-channel key
+    if ((rqp->sr_iod) && (rqp->sr_iod->iod_flags & SMBIOD_USE_CHANNEL_KEYS)) {
+        key    = rqp->sr_iod->iod_smb3_signing_key;
+        keylen = rqp->sr_iod->iod_smb3_signing_key_len;
+    } else {
+        key    = sessionp->session_smb3_signing_key;
+        keylen = sessionp->session_smb3_signing_key_len;
+    }
+	smb3_get_signature(key, keylen, mbp, NULL, request_len,
 					   rqp->sr_rqsig, SMB2SIGLEN);
 }
 
@@ -1468,13 +1595,14 @@ int smb3_rq_encrypt(struct smb_rq *rqp)
     struct smb_session      *sessionp = rqp->sr_session;
     size_t                  len;
     unsigned char           nonce[16];
-    unsigned char           dig[CCAES_BLOCK_SIZE];
+    unsigned char           sig[SMB3_AES_TF_SIG_LEN];
     uint64_t                i64;
     uint32_t                msglen, i32;
     uint16_t                i16;
     int                     error;
     unsigned char           *msgp;
     const struct ccmode_ccm *ccmode = ccaes_ccm_encrypt_mode();
+    const struct ccmode_gcm *gcmode = ccaes_gcm_encrypt_mode();
     size_t                  nbytes;
     mbuf_t                  mb, m2;
     struct mbchain          *mbp, *tmp_mbp;
@@ -1482,6 +1610,22 @@ int smb3_rq_encrypt(struct smb_rq *rqp)
 
     SMB_LOG_KTRACE(SMB_DBG_SMB_RQ_ENCRYPT | DBG_FUNC_START,
                    0, 0, 0, 0, 0);
+
+    switch (sessionp->session_smb3_encrypt_ciper) {
+        case SMB2_ENCRYPTION_AES_128_GCM:
+        case SMB2_ENCRYPTION_AES_256_GCM:
+            break;
+
+        case SMB2_ENCRYPTION_AES_128_CCM:
+        case SMB2_ENCRYPTION_AES_256_CCM:
+            break;
+
+        default:
+            SMBERROR("Unknown cipher %d defaulting to SMB2_ENCRYPTION_AES_128_CCM \n",
+                     sessionp->session_smb3_encrypt_ciper);
+            sessionp->session_smb3_encrypt_ciper = SMB2_ENCRYPTION_AES_128_CCM;
+            break;
+    }
 
     smb_rq_getrequest(rqp, &mbp);
 
@@ -1531,9 +1675,11 @@ int smb3_rq_encrypt(struct smb_rq *rqp)
     
     mb_hdr = NULL;
     
-    /* Declare/Init cypher context */
+    /* Declare ciphers */
     ccccm_ctx_decl(ccmode->size, ctx);
     ccccm_nonce_decl(ccmode->nonce_size, nonce_ctx);
+
+    ccgcm_ctx_decl(gcmode->size, gcm_ctx);
 
     if (!sessionp->session_smb3_encrypt_key_len) {
         /* Cannot encrypt without a key */
@@ -1572,9 +1718,20 @@ int smb3_rq_encrypt(struct smb_rq *rqp)
     memcpy(nonce, &sessionp->session_smb3_nonce_high, 8);
     memcpy(&nonce[8], &sessionp->session_smb3_nonce_low, 8);
     
-    // Zero last 5 bytes per spec
-    memset(&nonce[11], 0, 5);
-    
+    switch (sessionp->session_smb3_encrypt_ciper) {
+        case SMB2_ENCRYPTION_AES_128_GCM:
+        case SMB2_ENCRYPTION_AES_256_GCM:
+            // Zero last 4 bytes per spec
+            memset(&nonce[12], 0, 4);
+           break;
+
+        case SMB2_ENCRYPTION_AES_128_CCM:
+        case SMB2_ENCRYPTION_AES_256_CCM:
+            // Zero last 5 bytes per spec
+            memset(&nonce[11], 0, 5);
+            break;
+    }
+
     memcpy(msgp + SMB3_AES_TF_NONCE_OFF, nonce, SMB3_AES_TF_NONCE_LEN);
     
     // Get length of original message
@@ -1598,10 +1755,19 @@ int smb3_rq_encrypt(struct smb_rq *rqp)
            SMB3_AES_TF_MSGLEN_LEN);
     
     /* Set Encryption Algorithm */
-    i16 = htoles(SMB2_ENCRYPTION_AES128_CCM);
-    memcpy(msgp + SMB3_AES_TF_ENCR_ALG_OFF, &i16,
-           SMB3_AES_TF_ENCR_ALG_LEN);
-    
+    if (sessionp->session_flags & SMBV_SMB311) {
+        /* SMB 3.1.1 */
+        i16 = htoles(SMB311_ENCRYPTED_FLAG);
+        memcpy(msgp + SMB3_AES_TF_ENCR_ALG_OFF, &i16,
+               SMB3_AES_TF_ENCR_ALG_LEN);
+    }
+    else {
+        /* SMB 3.0 and 3.0.2 */
+        i16 = htoles(SMB2_ENCRYPTION_AES128_CCM);
+        memcpy(msgp + SMB3_AES_TF_ENCR_ALG_OFF, &i16,
+               SMB3_AES_TF_ENCR_ALG_LEN);
+    }
+
     /* Session ID */
     i64 = htoleq(rqp->sr_rqsessionid);
     memcpy(msgp + SMB3_AES_TF_SESSID_OFF, &i64,
@@ -1610,29 +1776,115 @@ int smb3_rq_encrypt(struct smb_rq *rqp)
     // Set data length of mb_hdr
     mbuf_setlen(mb_hdr, SMB3_AES_TF_HDR_LEN);
     
-    /* Init the cipher */
-    ccccm_init(ccmode, ctx, sessionp->session_smb3_encrypt_key_len, sessionp->session_smb3_encrypt_key);
-    
-    ccccm_set_iv(ccmode, ctx, nonce_ctx, SMB3_CCM_NONCE_LEN, msgp + SMB3_AES_TF_NONCE_OFF,
-                           SMB3_AES_TF_SIG_LEN, SMB3_AES_AUTHDATA_LEN, msglen);
+    /*
+     * At this point the transform header in mb_hdr is completely filled out
+     *
+     * SMB Transform Header looks like [MS-SMB2] 2.2.41
+     *      ProtocolId (4 bytes) - always 0x424D53FD
+     *      Signature (16 bytes) - Signature of data starting from the
+     *          unencrypted Transform Header Nonce and including encrypted data
+     *      Nonce (16 bytes) -
+     *          For AES-128-CCM and AES-256-CCM the nonce is AES-CCM-Nonce (11 bytes) + 5 bytes of 0
+     *          For AES-128-GCM and AES-256-GCM the nonce is AES-GCM-Nonce (12 bytes) + 4 bytes of 0
+     *      OriginalMessageSize (4 bytes) - len of the unencrypted data
+     *      Reserved (2 bytes) - always zero
+     *      Flags/EncryptionAlgorithm (2 bytes) - always 0x0001
+     *      SessionId (8 bytes) - set to SMB SessionID
+     *      EncryptedData (var length)
+     */
 
-    // Sign authenticated data
-    ccccm_cbcmac(ccmode, ctx, nonce_ctx, SMB3_AES_AUTHDATA_LEN, msgp + SMB3_AES_AUTHDATA_OFF);
-    
-    // Encrypt msg data in place
-    for (mb_tmp = mb; mb_tmp != NULL; mb_tmp = mbuf_next(mb_tmp)) {
-        nbytes = mbuf_len(mb_tmp);
-        
-        if (nbytes) {
-            ccccm_update(ccmode, ctx, nonce_ctx, nbytes,
-                         mbuf_data(mb_tmp), mbuf_data(mb_tmp));
-        }
+    /* Init the cipher */
+    switch (sessionp->session_smb3_encrypt_ciper) {
+        case SMB2_ENCRYPTION_AES_128_GCM:
+        case SMB2_ENCRYPTION_AES_256_GCM:
+            /* Init the cipher with key */
+            ccgcm_init(gcmode, gcm_ctx,
+                       sessionp->session_smb3_encrypt_key_len,
+                       sessionp->session_smb3_encrypt_key);
+
+            /* Set Initialization Values */
+            ccgcm_set_iv(gcmode, gcm_ctx,
+                         SMB3_GCM_NONCE_LEN,
+                         msgp + SMB3_AES_TF_NONCE_OFF);
+
+            /*
+             * Calculate signature for the following fields inside the SMB
+             * Transform Header (adds up to be 32 bytes):
+             * Nonce, OriginalMessageSize, Reserved, Flags/EncryptionAlgorithm,
+             * SessionID
+             */
+            ccgcm_aad(gcmode, gcm_ctx, SMB3_AES_AUTHDATA_LEN,
+                      msgp + SMB3_AES_AUTHDATA_OFF);
+
+            /* Encrypt msg data in place */
+            for (mb_tmp = mb; mb_tmp != NULL; mb_tmp = mbuf_next(mb_tmp)) {
+                nbytes = mbuf_len(mb_tmp);
+
+                if (nbytes) {
+                    ccgcm_update(gcmode, gcm_ctx, nbytes,
+                                 mbuf_data(mb_tmp), mbuf_data(mb_tmp));
+                }
+            }
+
+            /* Copy final signature to the transform header Signature field */
+            ccgcm_finalize(gcmode, gcm_ctx, CCAES_KEY_SIZE_128, sig);
+            memcpy(msgp + SMB3_AES_TF_SIG_OFF, sig, CCAES_KEY_SIZE_128);
+          break;
+
+        case SMB2_ENCRYPTION_AES_128_CCM:
+        case SMB2_ENCRYPTION_AES_256_CCM:
+            /* Init the cipher with key */
+            ccccm_init(ccmode, ctx,
+                       sessionp->session_smb3_encrypt_key_len,
+                       sessionp->session_smb3_encrypt_key);
+
+            /*
+             * 1. *nonce is the nonce inside the SMB Transform Header. This
+             *    API seems to generate and fill in the nonce for us.
+             *    SMB3_CCM_NONCE_LEN is defined to be 11 bytes.
+             * 2. mac_size is the size of the signature field inside the SMB
+             *    Transform Header which is 16 bytes
+             * 3. auth_len is the amount of data to sign in SMB Transform Header
+             *    which is 32 bytes
+             * 4. data_len is the amount of data to sign in Original message
+             */
+
+            /* Set Initialization Values */
+            ccccm_set_iv(ccmode, ctx, nonce_ctx, SMB3_CCM_NONCE_LEN,
+                         /* *nonce */ msgp + SMB3_AES_TF_NONCE_OFF,
+                         /* mac_size */ SMB3_AES_TF_SIG_LEN,
+                         /* auth_len */ SMB3_AES_AUTHDATA_LEN,
+                         /* data_len */ msglen);
+
+            /*
+             * Calculate signature for the following fields inside the SMB
+             * Transform Header (adds up to be 32 bytes):
+             * Nonce, OriginalMessageSize, Reserved, Flags/EncryptionAlgorithm,
+             * SessionID
+             */
+            ccccm_cbcmac(ccmode, ctx, nonce_ctx,
+                         SMB3_AES_AUTHDATA_LEN, msgp + SMB3_AES_AUTHDATA_OFF);
+
+            /* Encrypt msg data in place */
+            for (mb_tmp = mb; mb_tmp != NULL; mb_tmp = mbuf_next(mb_tmp)) {
+                nbytes = mbuf_len(mb_tmp);
+
+                if (nbytes) {
+                    ccccm_update(ccmode, ctx, nonce_ctx, nbytes,
+                                 mbuf_data(mb_tmp), mbuf_data(mb_tmp));
+                }
+            }
+
+            /*
+             * Get final signature and then copy it to the transform header
+             * Signature field
+             */
+            ccccm_finalize(ccmode, ctx, nonce_ctx, sig);
+            memcpy(msgp + SMB3_AES_TF_SIG_OFF, sig, CCAES_KEY_SIZE_128);
+
+            break;
     }
-    
-    // Set transform header signature
-    ccccm_finalize(ccmode, ctx, nonce_ctx, dig);
-    memcpy(msgp + SMB3_AES_TF_SIG_OFF, dig, CCAES_BLOCK_SIZE);
-    
+
     // Ideally, should turn off these flags from original mb:
     // (*mb)->m_flags &= ~(M_PKTHDR | M_EOR);
     
@@ -1656,6 +1908,8 @@ out:
     ccccm_ctx_clear(ccmode->size, ctx);
     ccccm_nonce_clear(ccmode->size, nonce_ctx);
     
+    ccgcm_ctx_clear(gcmode->size, gcm_ctx);
+
     SMB_LOG_KTRACE(SMB_DBG_SMB_RQ_ENCRYPT | DBG_FUNC_END,
                    error, 0, 0, 0, 0);
 
@@ -1677,6 +1931,7 @@ int smb3_msg_decrypt(struct smb_session *sessionp, mbuf_t *mb)
     unsigned char           *msgp;
     unsigned char           sig[SMB3_AES_TF_SIG_LEN];
     const struct ccmode_ccm *ccmode = ccaes_ccm_decrypt_mode();
+    const struct ccmode_gcm *gcmode = ccaes_gcm_decrypt_mode();
     size_t                  nbytes;
     uint32_t                mbuf_cnt = 0;
     char                    *cptr = NULL;
@@ -1689,14 +1944,32 @@ int smb3_msg_decrypt(struct smb_session *sessionp, mbuf_t *mb)
     SMB_LOG_KTRACE(SMB_DBG_SMB_RQ_DECRYPT | DBG_FUNC_START,
                    0, 0, 0, 0, 0);
 
+    switch (sessionp->session_smb3_encrypt_ciper) {
+        case SMB2_ENCRYPTION_AES_128_GCM:
+        case SMB2_ENCRYPTION_AES_256_GCM:
+            break;
+
+        case SMB2_ENCRYPTION_AES_128_CCM:
+        case SMB2_ENCRYPTION_AES_256_CCM:
+            break;
+
+        default:
+            SMBERROR("Unknown cipher %d defaulting to SMB2_ENCRYPTION_AES_128_CCM \n",
+                     sessionp->session_smb3_encrypt_ciper);
+            sessionp->session_smb3_encrypt_ciper = SMB2_ENCRYPTION_AES_128_CCM;
+            break;
+    }
+
     mbuf_payload = NULL;
     mb_hdr = NULL;
     error = 0;
     
-    /* Declare/Init cypher context */
+    /* Declare ciphers */
     ccccm_ctx_decl(ccmode->size, ctx);
     ccccm_nonce_decl(ccmode->nonce_size, nonce_ctx);
     
+    ccgcm_ctx_decl(gcmode->size, gcm_ctx);
+
     if (!sessionp->session_smb3_decrypt_key_len) {
         /* Cannot decrypt without a key */
         SMBDEBUG("smb3 decr, no key\n");
@@ -1731,7 +2004,15 @@ int smb3_msg_decrypt(struct smb_session *sessionp, mbuf_t *mb)
         goto out;
     }
     
-    // Verify the encryption algorithm
+    /*
+     * [MS-SMB2] 2.2.41
+     * For SMB 3.1.1, this field is Flags and set to Encrypted (0x0001)
+     * For SMB 3.0.x, this field is EncryptionAlgorithm and set to
+     * SMB2_ENCRYPTION_AES128-CCM (0x0001)
+     * So, in both cases, we just need to check that its set to 0x0001
+     *
+     * Verify the encryption algorithm
+     */
     i16 = letohs(tf_hdr->encrypt_algorithm);
     if (i16 != SMB2_ENCRYPTION_AES128_CCM) {
         SMBDEBUG("Unsupported ENCR alg: %u\n", (uint32_t)i16);
@@ -1752,13 +2033,40 @@ int smb3_msg_decrypt(struct smb_session *sessionp, mbuf_t *mb)
     msglen = letohl(tf_hdr->orig_msg_size);
     
     // Init the cipher
-    ccccm_init(ccmode, ctx, sessionp->session_smb3_decrypt_key_len, sessionp->session_smb3_decrypt_key);
-    
-    ccccm_set_iv(ccmode, ctx, nonce_ctx, SMB3_CCM_NONCE_LEN, msgp + SMB3_AES_TF_NONCE_OFF,
-                 SMB3_AES_TF_SIG_LEN, SMB3_AES_AUTHDATA_LEN, msglen);
+    switch (sessionp->session_smb3_encrypt_ciper) {
+        case SMB2_ENCRYPTION_AES_128_GCM:
+        case SMB2_ENCRYPTION_AES_256_GCM:
+            /* Init the cipher with key */
+            ccgcm_init(gcmode, gcm_ctx,
+                       sessionp->session_smb3_decrypt_key_len,
+                       sessionp->session_smb3_decrypt_key);
+            
+            /* Set Initialization Values */
+            ccgcm_set_iv(gcmode, gcm_ctx,
+                         SMB3_GCM_NONCE_LEN,
+                         msgp + SMB3_AES_TF_NONCE_OFF);
+            
+            /* Calculate Signature of Authenticated Data + Payload */
+            ccgcm_aad(gcmode, gcm_ctx, SMB3_AES_AUTHDATA_LEN,
+                      msgp + SMB3_AES_AUTHDATA_OFF);
+           break;
+            
+        case SMB2_ENCRYPTION_AES_128_CCM:
+        case SMB2_ENCRYPTION_AES_256_CCM:
+            /* Init the cipher with key */
+            ccccm_init(ccmode, ctx,
+                       sessionp->session_smb3_decrypt_key_len,
+                       sessionp->session_smb3_decrypt_key);
+            
+            /* Set Initialization Values */
+           ccccm_set_iv(ccmode, ctx, nonce_ctx, SMB3_CCM_NONCE_LEN, msgp + SMB3_AES_TF_NONCE_OFF,
+                         SMB3_AES_TF_SIG_LEN, SMB3_AES_AUTHDATA_LEN, msglen);
 
-    /* Calculate Signature of Authenticated Data + Payload */
-    ccccm_cbcmac(ccmode, ctx, nonce_ctx, SMB3_AES_AUTHDATA_LEN, msgp + SMB3_AES_AUTHDATA_OFF);
+            /* Calculate Signature of Authenticated Data + Payload */
+            ccccm_cbcmac(ccmode, ctx, nonce_ctx, SMB3_AES_AUTHDATA_LEN,
+                         msgp + SMB3_AES_AUTHDATA_OFF);
+           break;
+    }
 
     if (msglen > (64 * 1024)) {
         /*
@@ -1813,17 +2121,20 @@ int smb3_msg_decrypt(struct smb_session *sessionp, mbuf_t *mb)
 #endif
 
         /* decrypt the local buffer */
-        ccccm_update(ccmode, ctx, nonce_ctx, msglen,
-                     sessionp->decrypt_bufferp, sessionp->decrypt_bufferp);
-
-#if TIMING_ON
-        nanotime(&stop);
-        SMBERROR("After ccccm_update - Reply len %u. elapsed time %ld secs, %ld micro_secs\n",
-                 msglen,
-                 stop.tv_sec - start.tv_sec,
-                 (stop.tv_nsec - start.tv_nsec) / 1000
-                 );
-#endif
+        switch (sessionp->session_smb3_encrypt_ciper) {
+            case SMB2_ENCRYPTION_AES_128_GCM:
+            case SMB2_ENCRYPTION_AES_256_GCM:
+                ccgcm_update(gcmode, gcm_ctx, msglen,
+                             sessionp->decrypt_bufferp, sessionp->decrypt_bufferp);
+               break;
+                
+            case SMB2_ENCRYPTION_AES_128_CCM:
+            case SMB2_ENCRYPTION_AES_256_CCM:
+                /* decrypt the local buffer */
+                ccccm_update(ccmode, ctx, nonce_ctx, msglen,
+                             sessionp->decrypt_bufferp, sessionp->decrypt_bufferp);
+               break;
+        }
 
         /* copy the local buffer back into mbuf chain */
         cptr = sessionp->decrypt_bufferp;
@@ -1835,15 +2146,6 @@ int smb3_msg_decrypt(struct smb_session *sessionp, mbuf_t *mb)
                 cptr += nbytes;
             }
         }
-
-#if TIMING_ON
-        nanotime(&stop);
-        SMBERROR("After bcopy back to mbufs - Reply len %u. elapsed time %ld secs, %ld micro_secs\n",
-                 msglen,
-                 stop.tv_sec - start.tv_sec,
-                 (stop.tv_nsec - start.tv_nsec) / 1000
-                 );
-#endif
     }
     else {
         /* Decrypt msg data in place */
@@ -1852,33 +2154,36 @@ int smb3_msg_decrypt(struct smb_session *sessionp, mbuf_t *mb)
             nbytes = mbuf_len(mb_tmp);
 
             if (nbytes) {
-                ccccm_update(ccmode, ctx, nonce_ctx, nbytes,
-                             mbuf_data(mb_tmp), mbuf_data(mb_tmp));
+                switch (sessionp->session_smb3_encrypt_ciper) {
+                    case SMB2_ENCRYPTION_AES_128_GCM:
+                    case SMB2_ENCRYPTION_AES_256_GCM:
+                        ccgcm_update(gcmode, gcm_ctx, nbytes,
+                                     mbuf_data(mb_tmp), mbuf_data(mb_tmp));
+                       break;
+                        
+                    case SMB2_ENCRYPTION_AES_128_CCM:
+                    case SMB2_ENCRYPTION_AES_256_CCM:
+                        /* decrypt the local buffer */
+                        ccccm_update(ccmode, ctx, nonce_ctx, nbytes,
+                                     mbuf_data(mb_tmp), mbuf_data(mb_tmp));
+                       break;
+                }
             }
         }
-
-#if TIMING_ON
-        nanotime(&stop);
-        SMBERROR("After mbuf ccccm_update - nbytes %zu, Reply len %u. elapsed time %ld secs, %ld micro_secs, mbuf_cnt %d\n",
-                 nbytes,
-                 msglen,
-                 stop.tv_sec - start.tv_sec,
-                 (stop.tv_nsec - start.tv_nsec) / 1000,
-                 mbuf_cnt);
-#endif
     }
 
     /* Final signature -> sig */
-    ccccm_finalize(ccmode, ctx, nonce_ctx, sig);
-    
-#if TIMING_ON
-    nanotime(&stop);
-    SMBERROR("After ccccm_finalize - Reply len %u. elapsed time %ld secs, %ld micro_secs\n",
-             msglen,
-             stop.tv_sec - start.tv_sec,
-             (stop.tv_nsec - start.tv_nsec) / 1000
-             );
-#endif
+    switch (sessionp->session_smb3_encrypt_ciper) {
+        case SMB2_ENCRYPTION_AES_128_GCM:
+        case SMB2_ENCRYPTION_AES_256_GCM:
+            ccgcm_finalize(gcmode, gcm_ctx, CCAES_KEY_SIZE_128, sig);
+           break;
+            
+        case SMB2_ENCRYPTION_AES_128_CCM:
+        case SMB2_ENCRYPTION_AES_256_CCM:
+            ccccm_finalize(ccmode, ctx, nonce_ctx, sig);
+           break;
+    }
 
     // Check signature
     if (cc_cmp_safe(SMB3_AES_TF_SIG_LEN, sig, tf_hdr->signature)) {
@@ -1914,6 +2219,8 @@ out:
     ccccm_ctx_clear(ccmode->size, ctx);
     ccccm_nonce_clear(ccmode->size, nonce_ctx);
     
+    ccgcm_ctx_clear(gcmode->size, gcm_ctx);
+
     SMB_LOG_KTRACE(SMB_DBG_SMB_RQ_DECRYPT | DBG_FUNC_END,
                    error, 0, 0, 0, 0);
 
@@ -1965,27 +2272,33 @@ smb_kdf_hmac_sha256(uint8_t *input_key, uint32_t input_keylen,
 }
 
 /*
- * int smb3_derive_keys(struct smb_session *sessionp)
+ * int smb3_derive_keys(struct smbiod *iod)
  *
- * Derives all necessary keys for SMB 3
- * signing and encryption, which are all
+ * Derives all necessary keys for SMB 3 signing and encryption, which are all
  * stored in the smb_session struct.
  *
- * Keys are derived using KDF in Counter Mode
- * from as specified by sp800-108.
+ * Keys are derived using KDF in Counter Mode from as specified by sp800-108.
  *
  * Keys generated:
- *
- * session_smb3_signing_key
- * session_smb3_signing_key_len
+ *      session_smb3_signing_key
+ *      session_smb3_encrypt_key
+ *      session_smb3_decrypt_key
  *
  */
-int smb3_derive_keys(struct smb_session *sessionp)
+int smb3_derive_keys(struct smbiod *iod)
 {
     uint8_t label[16];
     uint8_t context[16];
-    int     err;
-    
+    int err;
+    struct smb_session *sessionp = NULL;
+    uint32_t key_len = SMB3_KEY_LEN;
+
+    if (iod == NULL) {
+        SMBERROR("iod is null? \n");
+        return(EINVAL);
+    }
+    sessionp = iod->iod_session;
+
     sessionp->session_smb3_signing_key_len = 0;
     sessionp->session_smb3_encrypt_key_len = 0;
     sessionp->session_smb3_decrypt_key_len = 0;
@@ -1999,23 +2312,41 @@ int smb3_derive_keys(struct smb_session *sessionp)
         err = EINVAL;
         goto out;
     }
+
     if (sessionp->session_mackeylen < SMB3_KEY_LEN) {
         SMBDEBUG("Warning: Session.SessionKey too small, len: %u\n",
                  sessionp->session_mackeylen);
     }
     
     // Derive Session.SigningKey (session_smb3_signing_key)
-    memset(label, 0, 16);
-    memset(context, 0, 16);
-    
-    strncpy((char *)label, "SMB2AESCMAC", 11);
-    strncpy((char *)context, "SmbSign", 7);
-    
-    err = smb_kdf_hmac_sha256(sessionp->session_mackey, sessionp->session_mackeylen,
-                              label, 12,  // includes NULL Terminator
-                              context, 8, // includes NULL Terminator
-                              sessionp->session_smb3_signing_key,
-                              SMB3_KEY_LEN);
+    memset(label, 0, sizeof(label));
+
+    if (sessionp->session_flags & SMBV_SMB311) {
+        /*
+         * For SMB 3.1.1, the label changed names and the context is now
+         * the pre auth integrity hash
+         */
+        strncpy((char *)label, "SMBSigningKey", sizeof(label));
+
+        err = smb_kdf_hmac_sha256(sessionp->session_mackey, sessionp->session_mackeylen,
+                                  label, 14,  // includes NULL Terminator
+                                  &iod->iod_pre_auth_int_hash[0], SHA512_DIGEST_LENGTH,
+                                  sessionp->session_smb3_signing_key,
+                                  SMB3_KEY_LEN);
+    }
+    else {
+        memset(context, 0, sizeof(context));
+
+        strncpy((char *)label, "SMB2AESCMAC", sizeof(label));
+        strncpy((char *)context, "SmbSign", sizeof(context));
+
+        err = smb_kdf_hmac_sha256(sessionp->session_mackey, sessionp->session_mackeylen,
+                                  label, 12,  // includes NULL Terminator
+                                  context, 8, // includes NULL Terminator
+                                  sessionp->session_smb3_signing_key,
+                                  SMB3_KEY_LEN);
+    }
+
     if (!err) {
         sessionp->session_smb3_signing_key_len = SMB3_KEY_LEN;
     } else {
@@ -2023,37 +2354,104 @@ int smb3_derive_keys(struct smb_session *sessionp)
     }
     
     // Derive Session.EncryptionKey (session_smb3_encrypt_key)
-    memset(label, 0, 16);
-    memset(context, 0, 16);
-    
-    memcpy(label, "SMB2AESCCM", 10);
-    memcpy(context, "ServerIn ", 9);
-    
-    err = smb_kdf_hmac_sha256(sessionp->session_mackey, sessionp->session_mackeylen,
-                              label, 11,  // includes NULL Terminator
-                              context, 10, // includes NULL Terminator
-                              sessionp->session_smb3_encrypt_key,
-                              SMB3_KEY_LEN);
+    memset(label, 0, sizeof(label));
+
+    if (sessionp->session_flags & SMBV_SMB311) {
+        /*
+         * For SMB 3.1.1, the label changed names and the context is now
+         * the pre auth integrity hash
+         */
+        strncpy((char *)label, "SMBC2SCipherKey", sizeof(label));
+        
+        if ((sessionp->session_smb3_encrypt_ciper == SMB2_ENCRYPTION_AES_256_CCM) ||
+            (sessionp->session_smb3_encrypt_ciper == SMB2_ENCRYPTION_AES_256_GCM)) {
+            /* [MS-SMB2] 3.2.5.3.1 Use the Session.FullSessionKey */
+            key_len = SMB3_256BIT_KEY_LEN;
+            err = smb_kdf_hmac_sha256(sessionp->full_session_mackey,
+                                      sessionp->full_session_mackeylen,
+                                      label, 16,  // includes NULL Terminator
+                                      iod->iod_pre_auth_int_hash, SHA512_DIGEST_LENGTH,
+                                      sessionp->session_smb3_encrypt_key,
+                                      key_len);
+       }
+        else {
+            key_len = SMB3_KEY_LEN;
+            err = smb_kdf_hmac_sha256(sessionp->session_mackey,
+                                      sessionp->session_mackeylen,
+                                      label, 16,  // includes NULL Terminator
+                                      iod->iod_pre_auth_int_hash, SHA512_DIGEST_LENGTH,
+                                      sessionp->session_smb3_encrypt_key,
+                                      key_len);
+        }
+    }
+    else {
+        memset(context, 0, sizeof(context));
+
+        strncpy((char *)label, "SMB2AESCCM", sizeof(label));
+        strncpy((char *)context, "ServerIn ", sizeof(context));
+
+        key_len = SMB3_KEY_LEN;
+        err = smb_kdf_hmac_sha256(sessionp->session_mackey, sessionp->session_mackeylen,
+                                  label, 11,  // includes NULL Terminator
+                                  context, 10, // includes NULL Terminator
+                                  sessionp->session_smb3_encrypt_key,
+                                  key_len);
+    }
+
     if (!err) {
-        sessionp->session_smb3_encrypt_key_len = SMB3_KEY_LEN;
+        sessionp->session_smb3_encrypt_key_len = key_len;
     } else {
         SMBDEBUG("Could not generate smb3 encrypt key, error: %d\n", err);
     }
     
     // Derive Session.DecryptionKey (session_smb3_decrypt_key)
-    memset(label, 0, 16);
-    memset(context, 0, 16);
-    
-    memcpy(label, "SMB2AESCCM", 10);
-    memcpy(context, "ServerOut", 9);
-    
-    err = smb_kdf_hmac_sha256(sessionp->session_mackey, sessionp->session_mackeylen,
-                              label, 11,  // includes NULL Terminator
-                              context, 10, // includes NULL Terminator
-                              sessionp->session_smb3_decrypt_key,
-                              SMB3_KEY_LEN);
+    memset(label, 0, sizeof(label));
+
+    if (sessionp->session_flags & SMBV_SMB311) {
+        /*
+         * For SMB 3.1.1, the label changed names and the context is now
+         * the pre auth integrity hash
+         */
+        strncpy((char *)label, "SMBS2CCipherKey", sizeof(label));
+
+        if ((sessionp->session_smb3_encrypt_ciper == SMB2_ENCRYPTION_AES_256_CCM) ||
+            (sessionp->session_smb3_encrypt_ciper == SMB2_ENCRYPTION_AES_256_GCM)) {
+            /* [MS-SMB2] 3.2.5.3.1 Use the Session.FullSessionKey */
+            key_len = SMB3_256BIT_KEY_LEN;
+            err = smb_kdf_hmac_sha256(sessionp->full_session_mackey,
+                                      sessionp->full_session_mackeylen,
+                                      label, 16,  // includes NULL Terminator
+                                      iod->iod_pre_auth_int_hash, SHA512_DIGEST_LENGTH,
+                                      sessionp->session_smb3_decrypt_key,
+                                      key_len);
+        }
+        else {
+            key_len = SMB3_KEY_LEN;
+            err = smb_kdf_hmac_sha256(sessionp->session_mackey,
+                                      sessionp->session_mackeylen,
+                                      label, 16,  // includes NULL Terminator
+                                      iod->iod_pre_auth_int_hash, SHA512_DIGEST_LENGTH,
+                                      sessionp->session_smb3_decrypt_key,
+                                      key_len);
+        }
+    }
+    else {
+        memset(context, 0, sizeof(context));
+
+        strncpy((char *)label, "SMB2AESCCM", sizeof(label));
+        strncpy((char *)context, "ServerOut", sizeof(context));
+
+        key_len = SMB3_KEY_LEN;
+        
+        err = smb_kdf_hmac_sha256(sessionp->session_mackey, sessionp->session_mackeylen,
+                                  label, 11,  // includes NULL Terminator
+                                  context, 10, // includes NULL Terminator
+                                  sessionp->session_smb3_decrypt_key,
+                                  key_len);
+    }
+
     if (!err) {
-        sessionp->session_smb3_decrypt_key_len = SMB3_KEY_LEN;
+        sessionp->session_smb3_decrypt_key_len = key_len;
     } else {
         SMBDEBUG("Could not generate smb3 decrypt key, error: %d\n", err);
     }
@@ -2062,6 +2460,200 @@ out:
     return (err);
 }
 
+/*
+ * int smb3_derive_channel_keys(struct smbiod *iod)
+ *
+ * Derives all necessary keys for SMB 3 alternate channel (Session Binding),
+ * which are all stored in the iod struct.
+ *
+ * For a session binding, we derive a new signing key for this channel, but
+ * copy the encryption/decryption keys from the main channel.
+ *
+ * Keys are derived using KDF in Counter Mode from as specified by sp800-108.
+ *
+ * Keys generated:
+ *      iod_smb3_signing_key
+ *
+ */
+int smb3_derive_channel_keys(struct smbiod *iod)
+{
+    uint8_t label[16];
+    uint8_t context[16];
+    int err;
+    struct smb_session *sessionp = NULL;
+
+    if (iod == NULL) {
+        SMBERROR("iod is null? \n");
+        return(EINVAL);
+    }
+    sessionp = iod->iod_session;
+
+    // Check iod.SessionKey
+    if (iod->iod_mackey == NULL) {
+        SMBDEBUG("Keys not generated, missing iod key\n");
+        return(EINVAL);
+    }
+
+    if (iod->iod_mackeylen < SMB3_KEY_LEN) {
+        SMBDEBUG("Warning: iod.SessionKey too small, len: %u\n",
+                 iod->iod_mackeylen);
+    }
+
+    iod->iod_smb3_signing_key_len = 0;
+    
+    // Derive iod.SigningKey (iod_smb3_signing_key)
+    memset(label, 0, sizeof(label));
+
+    if (sessionp->session_flags & SMBV_SMB311) {
+        /*
+         * For SMB 3.1.1, the label changed names and the context is now
+         * the pre auth integrity hash
+         */
+        strncpy((char *)label, "SMBSigningKey", sizeof(label));
+
+        err = smb_kdf_hmac_sha256(iod->iod_mackey, iod->iod_mackeylen,
+                                  label, 14,  // includes NULL Terminator
+                                  &iod->iod_pre_auth_int_hash[0], SHA512_DIGEST_LENGTH,
+                                  iod->iod_smb3_signing_key,
+                                  SMB3_KEY_LEN);
+    }
+    else {
+        memset(context, 0, sizeof(context));
+
+        strncpy((char *)label, "SMB2AESCMAC", sizeof(label));
+        strncpy((char *)context, "SmbSign", sizeof(context));
+
+        err = smb_kdf_hmac_sha256(iod->iod_mackey, iod->iod_mackeylen,
+                                  label, 12,  // includes NULL Terminator
+                                  context, 8, // includes NULL Terminator
+                                  iod->iod_smb3_signing_key,
+                                  SMB3_KEY_LEN);
+    }
+
+    if (!err) {
+        iod->iod_smb3_signing_key_len = SMB3_KEY_LEN;
+    } else {
+        SMBERROR("Could not generate smb3 signing key, error: %d\n", err);
+    }
+    
+    return (err);
+}
+
+int
+smb311_pre_auth_integrity_hash_init(struct smbiod *iod,
+                                    uint16_t command, mbuf_t m0)
+{
+    SHA512_CTX pre_auth_integrity_ctx;
+    uint8_t init_zero[64] = {0};
+    mbuf_t m = m0;
+
+    if (iod == NULL) {
+        return(EINVAL);
+    }
+
+    bzero(&pre_auth_integrity_ctx, sizeof(pre_auth_integrity_ctx));
+
+    /* Initialize the context */
+    SHA512_Init(&pre_auth_integrity_ctx);
+
+    if (command == SMB2_NEGOTIATE) {
+        /*
+         * This does the N = H(N1 || NegRequest), where N1 is 64 bytes of zeros
+         * m0 is the Negotiate request
+         * Start with 64 Zero bytes
+         */
+        SHA512_Update(&pre_auth_integrity_ctx, init_zero, 64);
+    }
+    else {
+        /*
+         * This does the S = H(N || SessSetupRequest), where N is Neg hash
+         * m0 is the Session Setup request
+         * Start with negotiate hash
+         */
+        SHA512_Update(&pre_auth_integrity_ctx,
+                      iod->iod_pre_auth_int_hash_neg,
+                      SHA512_DIGEST_LENGTH);
+    }
+
+    /* Or in the Request data */
+    while (m) {
+        if (mbuf_len(m) > 0) {
+            /* Update the hash */
+            SHA512_Update(&pre_auth_integrity_ctx, mbuf_data(m), mbuf_len(m));
+        }
+        m = mbuf_next(m);
+    }
+
+    /* Output the hash */
+    SHA512_Final(iod->iod_pre_auth_int_hash, &pre_auth_integrity_ctx);
+
+    return(0);
+}
+
+int
+smb311_pre_auth_integrity_hash_update(struct smbiod *iod, mbuf_t m0)
+{
+    SHA512_CTX pre_auth_integrity_ctx;
+    mbuf_t m = m0;
+
+    if (iod == NULL) {
+        return(EINVAL);
+    }
+
+    bzero(&pre_auth_integrity_ctx, sizeof(pre_auth_integrity_ctx));
+
+    /* Initialize the context */
+    SHA512_Init(&pre_auth_integrity_ctx);
+
+    /* Set the previous hash value */
+    SHA512_Update(&pre_auth_integrity_ctx,
+                  iod->iod_pre_auth_int_hash,
+                  SHA512_DIGEST_LENGTH);
+
+    while (m) {
+        if (mbuf_len(m) > 0) {
+            /* Update the hash */
+            SHA512_Update(&pre_auth_integrity_ctx, mbuf_data(m), mbuf_len(m));
+        }
+        m = mbuf_next(m);
+    }
+
+    /* Output the hash */
+    SHA512_Final(iod->iod_pre_auth_int_hash, &pre_auth_integrity_ctx);
+
+    return(0);
+}
+
+int
+smb311_pre_auth_integrity_hash_print(struct smbiod *iod)
+{
+    if (iod == NULL) {
+        return(EINVAL);
+    }
+
+#ifdef SMB_DEBUG
+    SMBERROR("0x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x \n",
+             iod->iod_pre_auth_int_hash[0],
+             iod->iod_pre_auth_int_hash[1],
+             iod->iod_pre_auth_int_hash[2],
+             iod->iod_pre_auth_int_hash[3],
+             iod->iod_pre_auth_int_hash[4],
+             iod->iod_pre_auth_int_hash[5],
+             iod->iod_pre_auth_int_hash[6],
+             iod->iod_pre_auth_int_hash[7],
+             iod->iod_pre_auth_int_hash[8],
+             iod->iod_pre_auth_int_hash[9],
+             iod->iod_pre_auth_int_hash[10],
+             iod->iod_pre_auth_int_hash[11],
+             iod->iod_pre_auth_int_hash[12],
+             iod->iod_pre_auth_int_hash[13],
+             iod->iod_pre_auth_int_hash[14],
+             iod->iod_pre_auth_int_hash[15]
+             );
+#endif
+
+    return(0);
+}
 
 #if 0
 void

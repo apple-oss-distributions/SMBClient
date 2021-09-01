@@ -23,6 +23,7 @@
 #ifndef _SMBLIB_PREFERENCES_H_
 #define _SMBLIB_PREFERENCES_H_
 
+#include <netsmb/smb_conn.h>
 
 #define DefaultNetBIOSResolverTimeout	1
 
@@ -64,6 +65,16 @@ struct smb_prefs {
 
     int32_t             max_read_size;
     int32_t             max_write_size;
+
+    int32_t             mc_max_channels;
+    int32_t             mc_max_rss_channels;
+    uint32_t            mc_client_if_blacklist[kClientIfBlacklistMaxLen];
+    uint32_t            mc_client_if_blacklist_len;
+    
+    int32_t             encrypt_algorithm_map;
+    uint32_t            force_sess_encrypt;
+    uint32_t            force_share_encrypt;
+
 };
 
 void getDefaultPreferences(struct smb_prefs *prefs);
