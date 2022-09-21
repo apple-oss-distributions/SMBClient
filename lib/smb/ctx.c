@@ -44,6 +44,7 @@
 #include <asl.h>
 #include <NetFS/NetFS.h>
 #include <NetFS/NetFSPrivate.h>
+#include <uuid/uuid.h>
 
 /* Needed for parsing the Negotiate Token  */
 #include <KerberosHelper/KerberosHelper.h>
@@ -405,11 +406,11 @@ int smb_ctx_setdomain(struct smb_ctx *ctx, const char *name)
 	if (ctx->ct_setup.ioc_domain[0])
 		return 0;
 	
-	if (strlen(name) > SMB_MAXNetBIOSNAMELEN) {
+	if (strlen(name) > SMB_MAX_DOMAIN_NAMELEN) {
 		os_log_error(OS_LOG_DEFAULT, "domain/workgroup name '%s' too long", name);
 		return ENAMETOOLONG;
 	}
-	strlcpy(ctx->ct_setup.ioc_domain,  name, SMB_MAXNetBIOSNAMELEN+1);
+	strlcpy(ctx->ct_setup.ioc_domain,  name, SMB_MAX_DOMAIN_NAMELEN+1);
 	return 0;
 }
 
@@ -491,7 +492,7 @@ static int smb_ctx_getnbname(struct smb_ctx *ctx, struct sockaddr *sap)
 	return error;
 }
 
-static int smb_ctx_gethandle(struct smb_ctx *ctx)
+int smb_ctx_gethandle(struct smb_ctx *ctx)
 {
 	int fd, i;
 	char buf[20];
@@ -638,7 +639,7 @@ needToSpawnMCNotifier(int pid)
  */
 static int findMatchingSession(struct smb_ctx *ctx,
                                CFMutableArrayRef addressArray,
-                               void *sessionp,
+                               uint8_t *uuid,
                                Boolean forceHiFi)
 {
 	struct smbioc_negotiate	rq;
@@ -704,8 +705,11 @@ static int findMatchingSession(struct smb_ctx *ctx,
             rq.ioc_extra_flags |= SMB_HIFI_REQUESTED;
         }
 
-        if (sessionp != NULL) {
-            rq.ioc_sessionp = sessionp;
+        if (uuid != NULL) {
+            memcpy(rq.ioc_session_uuid, uuid, sizeof(rq.ioc_session_uuid));
+        }
+        else {
+            bzero(rq.ioc_session_uuid, sizeof(rq.ioc_session_uuid));
         }
 
         /* Call the kernel to see if we already have a session */
@@ -908,10 +912,10 @@ static int smb_negotiate(struct smb_ctx *ctx, struct sockaddr *raddr,
             rq.ioc_extra_flags |= SMB_MULTICHANNEL_ENABLE;
             rq.ioc_mc_max_channel = ctx->prefs.mc_max_channels;
             rq.ioc_mc_max_rss_channel = ctx->prefs.mc_max_rss_channels;
-            bcopy(ctx->prefs.mc_client_if_blacklist,
-                  rq.ioc_mc_client_if_blacklist,
-                  sizeof(rq.ioc_mc_client_if_blacklist));
-            rq.ioc_mc_client_if_blacklist_len = ctx->prefs.mc_client_if_blacklist_len;
+            bcopy(ctx->prefs.mc_client_if_ignorelist,
+                  rq.ioc_mc_client_if_ignorelist,
+                  sizeof(rq.ioc_mc_client_if_ignorelist));
+            rq.ioc_mc_client_if_ignorelist_len = ctx->prefs.mc_client_if_ignorelist_len;
             if (ctx->prefs.altflags & SMBFS_MNT_MC_PREFER_WIRED) {
                 rq.ioc_extra_flags |= SMB_MC_PREFER_WIRED;
             }
@@ -987,10 +991,11 @@ static int smb_negotiate(struct smb_ctx *ctx, struct sockaddr *raddr,
     /* prefill with 1's in case we fail to get the host uuid */
     memset(rq.ioc_client_guid, 1, sizeof(rq.ioc_client_guid));
     
-    error = gethostuuid(rq.ioc_client_guid, &timeout);
-    if (error) {
-		os_log_error(OS_LOG_DEFAULT, "gethostuuid failed %d", errno);
-    }
+    /*
+     * Looking at Windows 10 client, they create a new client GUID for every
+     * new Negotiate request so we should do the same.
+     */
+    uuid_generate(rq.ioc_client_guid);
     
 	/* Should we also try to match on the dns name? */
 	if ((ctx->ct_flags & SMBCF_MATCH_DNS) &&
@@ -1242,9 +1247,8 @@ void smb_get_session_properties(struct smb_ctx *ctx)
         model_len = strnlen(properties.model_info, sizeof(properties.model_info));
         if ((properties.misc_flags & SMBV_OSX_SERVER) && (model_len > 0)) {
             /* SMBV_OSX_SERVER and we have the model information from session */
-            ctx->model_info = malloc(model_len + 1); /* add space for null */
+            ctx->model_info = calloc(model_len + 1, 1); /* add space for null */
             if (ctx->model_info) {
-                memset(ctx->model_info, 0, model_len);
                 memcpy(ctx->model_info, properties.model_info, model_len);
             }
         }
@@ -2961,12 +2965,25 @@ int smb_open_session(struct smb_ctx *ctx, CFURLRef url, CFDictionaryRef OpenOpti
                     }
 
                     if (error == 0) {
-                        while (ioctl(ctx->ct_fd, SMBIOC_GET_NOTIFIER_PID, &ioc_pid) != -1 && ioc_pid.pid != child) {
+                        // Validate mc_notifier is up and running
+                        while (1) {
+                            ioc_pid.pid = -1;
+                            int ioctl_err = ioctl(ctx->ct_fd, SMBIOC_GET_NOTIFIER_PID, &ioc_pid);
+                            if (ioctl_err == -1) {
+                                os_log_error(OS_LOG_DEFAULT, "%s: mc_notifier ioctl SMBIOC_GET_NOTIFIER_PID returned error (%d, %d, %d, %d)",
+                                                 __FUNCTION__, child, ioc_pid.pid, ioctl_err, errno);
+                                break;
+                            }
+                            if (ioc_pid.pid != -1) {
+                                // The mc_notifier is up and running
+                                // (rdar://90008869: the mc_notifier may had already been running, and thats cool)
+                                break;
+                            }
                             sleep(1);
                             notifier_on_timeout++;
                             if (notifier_on_timeout > 60) {
                                 os_log_error(OS_LOG_DEFAULT, "%s: MC notifier timeout (%d)",
-                                             __FUNCTION__, error);
+                                             __FUNCTION__, ioctl_err);
                                 break;
                             }
                         }
@@ -3666,13 +3683,14 @@ int findMountPointSession(void *inRef, const char *mntPoint)
 		CFDataAppendBytes(addressData, (const UInt8 *)&conn, (CFIndex)sizeof(conn));
 		CFArrayAppendValue(addressArray, addressData);
 		CFRelease(addressData);
-		error = findMatchingSession(inRef, addressArray, pb.sessionp, FALSE);
+
+		error = findMatchingSession(inRef, addressArray, pb.session_uuid, FALSE);
         if (error == ENOENT) {
             /*
              * <67014611> Maybe it was mounted with HiFi option? Try searching
              * again with HiFi option set.
              */
-            error = findMatchingSession(inRef, addressArray, pb.sessionp, TRUE);
+            error = findMatchingSession(inRef, addressArray, pb.session_uuid, TRUE);
         }
 	} else {
 		error = ENOMEM;
