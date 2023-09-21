@@ -169,6 +169,10 @@
 #define SMBV_FORCE_SESSION_ENCRYPT  0x10000000  /* Force session level encryption */
 #define SMBV_FORCE_SHARE_ENCRYPT    0x20000000  /* Force share level encryption */
 #define SMBV_FORCE_IPC_ENCRYPT      0x40000000  /* Force share level encryption on IPC$ */
+#define SMBV_FORCE_SHARE_ENCRYPT    0x20000000  /* Force share level encryption */
+#define SMBV_FORCE_IPC_ENCRYPT      0x40000000  /* Force share level encryption on IPC$ */
+#define SMBV_ENABLE_AES_128_CMAC    0x080000000  /* Enable SMB v3.1.1 AES_128_CMAC signing */
+#define SMBV_ENABLE_AES_128_GMAC    0x100000000  /* Enable SMB v3.1.1 AES_128_GMAC signing */
 
 #define SMBV_HAS_GUEST_ACCESS(sessionp)		(((sessionp)->session_flags & (SMBV_GUEST_ACCESS | SMBV_SFS_ACCESS)) != 0)
 #define SMBV_HAS_ANONYMOUS_ACCESS(sessionp)	(((sessionp)->session_flags & (SMBV_ANONYMOUS_ACCESS | SMBV_SFS_ACCESS)) != 0)
@@ -200,19 +204,20 @@
  * Negotiated protocol parameters
  */
 struct smb_sopt {
-    uint32_t    sv_maxtx;           /* maximum transmit buf size */
-    uint16_t    sv_maxmux;          /* SMB 1 - max number of outstanding rq's */
-    uint16_t    sv_maxsessions;     /* SMB 1 - max number of sessions */
-    uint32_t    sv_skey;            /* session key */
-    uint32_t    sv_caps;            /* SMB 1 - capabilities, preset for SMB 2/3 */
-    uint32_t    sv_sessflags;       /* SMB 2/3 - final session setup reply flags */
-    uint16_t    sv_dialect;         /* SMB 2 - dialect (non zero for SMB 2/3 */
-    uint32_t    sv_capabilities;    /* SMB 2 - capabilities */
-    uint32_t    sv_maxtransact;     /* SMB 2 - max transact size */
-    uint32_t    sv_maxread;         /* SMB 2 - max read size */
-    uint32_t    sv_maxwrite;        /* SMB 2 - max write size */
-    uint8_t     sv_guid[16];        /* SMB 2 - GUID */
-    uint16_t    sv_security_mode;   /* SMB 2 - security mode */
+    uint32_t    sv_maxtx;               /* maximum transmit buf size */
+    uint16_t    sv_maxmux;              /* SMB 1 - max number of outstanding rq's */
+    uint16_t    sv_maxsessions;         /* SMB 1 - max number of sessions */
+    uint32_t    sv_skey;                /* session key */
+    uint32_t    sv_caps;                /* SMB 1 - capabilities, preset for SMB 2/3 */
+    uint32_t    sv_sessflags;           /* SMB 2/3 - final session setup reply flags */
+    uint16_t    sv_dialect;             /* SMB 2 - dialect (non zero for SMB 2/3 */
+    uint32_t    sv_saved_capabilities;  /* SMB 2 - capabilities to check validate_negotiate */
+    uint32_t    sv_active_capabilities; /* SMB 2 - active capabilities to check during runtime */
+    uint32_t    sv_maxtransact;         /* SMB 2 - max transact size */
+    uint32_t    sv_maxread;             /* SMB 2 - max read size */
+    uint32_t    sv_maxwrite;            /* SMB 2 - max write size */
+    uint8_t     sv_guid[16];            /* SMB 2 - GUID */
+    uint16_t    sv_security_mode;       /* SMB 2 - security mode */
 };
 
 /*
@@ -466,7 +471,9 @@ struct smb_session {
     /* Adaptive Read/Write values */
     lck_mtx_t           iod_quantum_lock;
     uint32_t            iod_readSizes[3];           /* [0] = min, [1] = med, [2] = max */
+    uint32_t            iod_readCounts[3];          /* [0] = max, [1] = med, [2] = min */
     uint32_t            iod_writeSizes[3];          /* [0] = min, [1] = med, [2] = max */
+    uint32_t            iod_writeCounts[3];         /* [0] = max, [1] = med, [2] = min */
     uint64_t            iod_readBytePerSec[3];      /* [0] = min, [1] = med, [2] = max */
     uint64_t            iod_writeBytePerSec[3];     /* [0] = min, [1] = med, [2] = max */
     struct timeval      iod_last_recheck_time;      /* Last time we checked speeds */
@@ -476,9 +483,12 @@ struct smb_session {
     uint32_t            iod_writeQuantumSize;       /* current write quantum size */
     uint32_t            iod_writeQuantumNumber;     /* current write quantum number */
 
+    int32_t             rw_thread_control;
+
     /* SMB 3 signing key (Session.SessionKey) */
     uint8_t             session_smb3_signing_key[SMB3_KEY_LEN];
     uint32_t            session_smb3_signing_key_len;
+    uint16_t            session_smb3_signing_algorithm;
     
     /* SMB 3 encryption key (Session.EncryptionKey) */
     /* A 128-bit key used for encrypting messages sent by the client */
@@ -534,6 +544,10 @@ struct smb_session {
     uint64_t            session_gone_iod_total_tx_bytes;
     /* total number of bytes received by this session on gone channels */
     uint64_t            session_gone_iod_total_rx_bytes;
+    /* total number of packets transmitted by this session on gone channels */
+    uint64_t            session_gone_iod_total_tx_packets;
+    /* total number of packets received by this session on gone channels */
+    uint64_t            session_gone_iod_total_rx_packets;
     uint32_t            session_reconnect_count;    // The number of times this session has gone through reconnect
     struct timespec     session_setup_time;         // The local time at which the session has been established
     struct timespec     session_reconnect_time;     // The last time a reconnect took place
@@ -555,6 +569,9 @@ struct smb_session {
     char                snapshot_time[32] __attribute((aligned(8)));
     time_t              snapshot_local_time;
     
+    /* For DFS, if tree connect returns STATUS_SMB_BAD_CLUSTER_DIALECT */
+    uint32_t             session_max_dialect;
+
     uint8_t             uuid[16];                   // session random ID to return to userspace
 };
 
@@ -860,11 +877,14 @@ struct smbiod {
     struct conn_params  iod_conn_entry;
     uint64_t            iod_total_tx_bytes;     /* The total number of bytes transmitted by this iod */
     uint64_t            iod_total_rx_bytes;     /* The total number of bytes received by this iod */
+    uint64_t            iod_total_tx_packets;     /* The total number of packets transmitted by this iod */
+    uint64_t            iod_total_rx_packets;     /* The total number of packets received by this iod */
     struct timespec     iod_session_setup_time;
     
     /* Saved last session setup reply */
     uint8_t             *iod_sess_setup_reply;  /* Used for pre auth and alt channels */
     size_t              iod_sess_setup_reply_len;
+    uint64_t            iod_sess_setup_message_id; /* Used for AES-GMAC signing */
 
     struct timeval      iod_connection_to; /* tcp connection timeout */
 };

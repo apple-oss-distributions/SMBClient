@@ -590,6 +590,9 @@ struct smb_vnode_attr {
 #define SMB2_LEASE_HANDLE_CACHING   0x02
 #define SMB2_LEASE_WRITE_CACHING	0x04
 
+/* Lease related defines */
+#define SMB2_LEASE_PROCESS_TIME     30
+
 /* SMB 2/3 ImpersonationLevel, 2.2.13 */
 #define SMB2_IMPERSONATION_ANONYMOUS	    0x00000000
 #define SMB2_IMPERSONATION_IDENTIFICATION   0x00000001
@@ -649,6 +652,7 @@ struct smb_vnode_attr {
 #define SMB2_NETNAME_NEGOTIATE_CONTEXT_ID       0x0005
 #define SMB2_TRANSPORT_CAPABILITIES             0x0006
 #define SMB2_RDMA_TRANSFORM_CAPABILITIES        0x0007
+#define SMB2_SIGNING_CAPABILITIES               0x0008
 
 /* SMB 311 SMB2_PREAUTH_INTEGRITY_CAPABILITIES names, 2.2.3.1.1 */
 #define SMB2_PREAUTH_INTEGRITY_SHA512           0x0001
@@ -668,6 +672,11 @@ struct smb_vnode_attr {
 #define SMB2_COMPRESSION_LZ77                   0x0002
 #define SMB2_COMPRESSION_LZ77_HUFFMAN           0x0003
 #define SMB2_COMPRESSION_PATTERN_V1             0x0004
+
+/* SMB 311 SMB2_SIGNING_CAPABILITIES names, 2.2.3.1.7 */
+#define SMB2_SIGNING_HMAC_SHA256                0x0000
+#define SMB2_SIGNING_AES_CMAC                   0x0001
+#define SMB2_SIGNING_AES_GMAC                   0x0002
 
 /* SMB 2/3 CREATE_CONTEXT names, 2.2.13.2 */
 #define SMB2_CREATE_EA_BUFFER                   0x45787441 /* "ExtA" */

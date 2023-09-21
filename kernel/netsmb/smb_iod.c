@@ -60,6 +60,7 @@
 #include <netsmb/smb_trantcp.h>
 #include <netsmb/smb_subr.h>
 #include <netsmb/smb_gss.h>
+#include <netsmb/smb_dev_2.h>
 #include <smbfs/smbfs.h>
 #include <netsmb/smb_packets_2.h>
 #include <smbclient/ntstatus.h>
@@ -72,6 +73,10 @@
 #include <netsmb/smb_sleephandler.h>
 
 #define MAX_CHANNEL_LIST (12)
+
+
+#define OSIncrementAtomic64(a) \
+    (OSIncrementAtomic64(__SAFE_CAST_PTR(volatile SInt64*,a)))
 
 struct smb_reconnect_stats smb_reconn_stats;
 
@@ -348,7 +353,7 @@ smb_iod_dead(struct smbiod *iod)
  * should block until the reconnect process is completed. This routine is always excuted
  * from the main thread.
  */
-static void smb_iod_start_reconnect(struct smbiod *iod)
+void smb_iod_start_reconnect(struct smbiod *iod)
 {
 	struct smb_share *share, *tshare;
 	struct smb_rq *rqp, *trqp;
@@ -1197,6 +1202,7 @@ smb_iod_sendrq(struct smbiod *iod, struct smb_rq *rqp)
 		rqp->sr_credit_timesent = rqp->sr_timesent;
         iod->iod_lastrqsent = rqp->sr_timesent;
         OSAddAtomic64(len, &iod->iod_total_tx_bytes);
+        OSIncrementAtomic64(&iod->iod_total_tx_packets);
         rqp->sr_state = SMBRQ_SENT;
         /* 
          * For SMB 2/3, set flag indicating this request was sent. Used for 
@@ -1625,6 +1631,7 @@ smb_iod_recvall(struct smbiod *iod)
 			continue;
 		}
         OSAddAtomic64(mbuf_get_chain_len(m), &iod->iod_total_rx_bytes);
+        OSIncrementAtomic64(&iod->iod_total_rx_packets);
 
         /*
          * It's possible the first mbuf in the chain
@@ -1944,6 +1951,7 @@ smb_iod_recvall(struct smbiod *iod)
                                  */
                                 iod->iod_flags |= SMBIOD_USE_CHANNEL_KEYS;
                             }
+                            iod->iod_sess_setup_message_id = rqp->sr_messageid; //used for AES-GMAC signing
                         }
                         
                         break;
@@ -3770,6 +3778,10 @@ static void smb_iod_thread(void *arg)
                       &sessionp->session_gone_iod_total_tx_bytes);
         OSAddAtomic64(iod->iod_total_rx_bytes,
                       &sessionp->session_gone_iod_total_rx_bytes);
+        OSAddAtomic64(iod->iod_total_tx_packets,
+                      &sessionp->session_gone_iod_total_tx_packets);
+        OSAddAtomic64(iod->iod_total_rx_packets,
+                      &sessionp->session_gone_iod_total_rx_packets);
 
         smb_iod_gss_destroy(iod);
         /*
@@ -3799,6 +3811,8 @@ static void smb_iod_thread(void *arg)
         /* update the session gone iod's counters with the iod tx/rx bytes */
         OSAddAtomic64(iod->iod_total_tx_bytes, &sessionp->session_gone_iod_total_tx_bytes);
         OSAddAtomic64(iod->iod_total_rx_bytes, &sessionp->session_gone_iod_total_rx_bytes);
+        OSAddAtomic64(iod->iod_total_tx_packets, &sessionp->session_gone_iod_total_tx_packets);
+        OSAddAtomic64(iod->iod_total_rx_packets, &sessionp->session_gone_iod_total_rx_packets);
 
         /*
          * this comment is the last place where main iod can access

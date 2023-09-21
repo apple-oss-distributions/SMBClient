@@ -28,6 +28,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 
 #ifndef __cplusplus
 #include <stdbool.h>
@@ -304,6 +305,7 @@ typedef struct SMBShareAttributes
     uint32_t    session_smb1_caps;
     uint32_t    session_smb2_caps;
     uint32_t    session_encrypt_cipher;
+    uint32_t    session_signing_algorithm;
     uint32_t    ss_flags;
     uint32_t    ss_type;
     uint32_t    ss_caps;
@@ -311,6 +313,11 @@ typedef struct SMBShareAttributes
     uint16_t	ss_fstype;
     char		server_name[kMaxSrvNameLen];
     char        snapshot_time[32];
+
+    uint32_t    session_reconnect_count;
+    uint32_t    reserved;
+    struct timespec session_reconnect_time;
+
 } SMBShareAttributes;
 
 /*!
@@ -351,6 +358,7 @@ API_AVAILABLE(macos(11.3))
  * @param inConnection A SMBHANDLE created by SMBOpenServerEx.
  * @param outAttrs is of the type smbioc_nic_info and contains
  * information about the network interface
+ * Note: The member ioc_nic_props_buffer should be allocated and freed by the caller
  * @param inClientOrServer flag to deternime whioch interfaces to return
  * @result Returns an NTSTATUS error code.
  */

@@ -818,12 +818,6 @@ resend:
                  error, create_rqp->sr_messageid);
     }
 
-    /* Got file id from Create Context */
-    if (create_flags & SMB2_CREATE_QUERY_DISK_ID) {
-        fap->fa_ino = createp->ret_disk_file_id;
-        smb2fs_smb_file_id_check(share, fap->fa_ino, NULL, 0);
-    }
-
 parse_query:
     if (query_rqp != NULL) {
         /* Consume any pad bytes */
@@ -1854,12 +1848,6 @@ resend:
             SMBERROR("smb2fs_smb_parse_ntcreatex failed %d id %lld\n",
                      error, create_rqp->sr_messageid);
         }
-
-        /* Got file id from Create Context */
-        if (create_flags & SMB2_CREATE_QUERY_DISK_ID) {
-            fap->fa_ino = createp->ret_disk_file_id;
-            smb2fs_smb_file_id_check(share, fap->fa_ino, NULL, 0);
-        }
     }
 
 parse_query:
@@ -2429,7 +2417,9 @@ parse_setinfo:
                     SMBDEBUG("setinfo smb2_rq_parse_header failed %d, id %lld\n",
                              tmp_error, setinfo_rqp->sr_messageid);
                 }
-                error = tmp_error;
+                
+                /* Ok to ignore any errors from the SetInfo */
+                //error = tmp_error;
             }
             goto parse_close;
         }
@@ -2443,7 +2433,9 @@ parse_setinfo:
                     SMBERROR("smb2_smb_parse_set_info failed %d id %lld\n",
                              tmp_error, setinfo_rqp->sr_messageid);
                 }
-                error = tmp_error;
+                
+                /* Ok to ignore any errors from the SetInfo */
+                //error = tmp_error;
             }
             goto parse_close;
         }
@@ -3296,31 +3288,8 @@ smb2fs_smb_cmpd_query_async(struct smb_share *share, vnode_t dvp,
 
     SMB_MALLOC_TYPE_COUNT(pb, struct compound_pb, dir_cache_async_cnt, Z_WAITOK);
     /* Zero out param blocks */
-    for (i = 0; i < dir_cache_async_cnt; i++) {
-        pb[i].dnp = NULL;
-        pb[i].entryp = NULL;
-        
-        pb[i].createp = NULL;
-        pb[i].queryp = NULL;
-        pb[i].closep = NULL;
-        pb[i].stream_infop = NULL;
-        
-        pb[i].create_rqp = NULL;
-        pb[i].query_rqp = NULL;
-        pb[i].close_rqp = NULL;
-        
-        bzero(&pb[i].fattr, sizeof(pb[i].fattr));
-        pb[i].fid = 0;
-        pb[i].rsrc_size = 0;
-        pb[i].alloc_rsrc_size = 0;
-        pb[i].stream_flags = 0;
-        
-        bzero(&pb[i].finfo, sizeof(pb[i].finfo));
-        pb[i].finfo_uio = NULL;
-        
-        pb[i].pending = 0;
-    }
-    
+    bzero(pb, dir_cache_async_cnt * sizeof(struct compound_pb));
+
     /*
      * Count how many entries need Meta Data or Finder Info.
      * All entries will need their Meta Data fetched, but only those items that
@@ -4304,7 +4273,7 @@ resend:
      * cache dir entries.
 	 */
 	if ((SMBV_SMB3_OR_LATER(sessionp)) &&
-		(sessionp->session_sopt.sv_capabilities & SMB2_GLOBAL_CAP_DIRECTORY_LEASING) &&
+		(sessionp->session_sopt.sv_active_capabilities & SMB2_GLOBAL_CAP_DIRECTORY_LEASING) &&
 		!(ctx->f_share->ss_mount->sm_args.altflags & SMBFS_MNT_DIR_LEASE_OFF) &&
         (ctx->f_is_readdir == 0)) {
 
@@ -5725,12 +5694,6 @@ resend:
         SMBERROR("smb2fs_smb_parse_ntcreatex failed %d id %lld\n", 
                  error, create_rqp->sr_messageid);
     }
-    
-    /* Got file id from Create Context */
-    if (create_flags & SMB2_CREATE_QUERY_DISK_ID) {
-        fap->fa_ino = createp->ret_disk_file_id;
-        smb2fs_smb_file_id_check(share, fap->fa_ino, NULL, 0);
-    }
 
 parse_query:
     if (query_rqp != NULL) {
@@ -6288,17 +6251,23 @@ resend:
                                                    file_namep, stream_namep,
                                                    vnode_type, 1);
     if ((SMBV_SMB21_OR_LATER(sessionp)) &&
-        (sessionp->session_sopt.sv_capabilities & SMB2_GLOBAL_CAP_LEASING) &&
+        (sessionp->session_sopt.sv_active_capabilities & SMB2_GLOBAL_CAP_LEASING) &&
         (vnode_type == VREG)) {
-        /* Add in the file lease to avoid a lease break due to rename */
-        smb2_lease_init(share, NULL, create_np, 0, &temp_lease, 1);
-        temp_lease.req_lease_state = create_np->n_lease.lease_state;
-        dur_hndl_lease.leasep = &temp_lease;
-        lease_need_free = 1;
+        /*
+         * if SMBFS_MNT_DUR_HANDLE_LOCKFID_ONLY is on and
+         * it's not an O_EXLOCK/O_SHLOCK open, we shouldn't ask for a lease
+         */
+        if (((share->ss_mount->sm_args.altflags & SMBFS_MNT_DUR_HANDLE_LOCKFID_ONLY) == 0) ||
+            ((share_access & NTCREATEX_SHARE_ACCESS_WRITE) == 0)) {
+            /* Add in the file lease to avoid a lease break due to rename */
+            smb2_lease_init(share, NULL, create_np, 0, &temp_lease, 1);
+            temp_lease.req_lease_state = create_np->n_lease.lease_state;
+            dur_hndl_lease.leasep = &temp_lease;
+            lease_need_free = 1;
 
-        /* lease should already be in the tables */
-        
-        create_flags |= SMB2_CREATE_FILE_LEASE;
+            /* lease should already be in the tables */
+            create_flags |= SMB2_CREATE_FILE_LEASE;
+        }
     }
 
     error = smb2fs_smb_ntcreatex(share, create_np,
@@ -8454,7 +8423,7 @@ smb2fs_smb_lease_upgrade(struct smb_share *share, vnode_t vp,
     }
 
     if (!(SMBV_SMB21_OR_LATER(sessionp)) ||
-        !(sessionp->session_sopt.sv_capabilities & SMB2_GLOBAL_CAP_LEASING)) {
+        !(sessionp->session_sopt.sv_active_capabilities & SMB2_GLOBAL_CAP_LEASING)) {
         /* No leases supported so nothing to do */
         return(0);
     }
@@ -8973,7 +8942,7 @@ smb2fs_smb_ntcreatex(struct smb_share *share, struct smbnode *np,
      */
     error = smb2fs_smb_parse_ntcreatex(share, np, createp, 
                                        fidp, fap, context);
-    
+
 bad:
     if (createp != NULL) {
         SMB_FREE_TYPE(struct smb2_create_rq, createp);
@@ -9025,7 +8994,7 @@ smbfs_smb_ntcreatex(struct smb_share *share, struct smbnode *np,
             create_flags |= SMB2_CREATE_DO_CREATE;
         }
 
-        if (SS_TO_SESSION(share)->session_sopt.sv_capabilities & SMB2_GLOBAL_CAP_LEASING) {
+        if (SS_TO_SESSION(share)->session_sopt.sv_active_capabilities & SMB2_GLOBAL_CAP_LEASING) {
             /* Server supports file leasing */
             if ((dur_hndl_leasep != NULL) && (dur_hndl_leasep->dur_handlep != NULL)) {
                 if (dur_hndl_leasep->dur_handlep->flags & (SMB2_DURABLE_HANDLE_REQUEST | SMB2_PERSISTENT_HANDLE_REQUEST)) {
@@ -9184,7 +9153,12 @@ smb2fs_smb_parse_ntcreatex(struct smb_share *share, struct smbnode *np,
     smb_time_NT2local(createp->ret_access_time, &fap->fa_atime);
     smb_time_NT2local(createp->ret_write_time, &fap->fa_mtime);
     smb_time_NT2local(createp->ret_change_time, &fap->fa_chtime);
-    
+    /* Got file id from Create Context */
+    if (createp->flags & SMB2_CREATE_QUERY_DISK_ID) {
+        fap->fa_ino = createp->ret_disk_file_id;
+        smb2fs_smb_file_id_check(share, fap->fa_ino, NULL, 0);
+    }
+
     /*
      * Because of the Steve/Conrad Symlinks we can never be completely
      * sure that we have the correct vnode type if its a file. For 
@@ -10832,8 +10806,10 @@ try_again:
     /* Verify that the server info matches our current session */
     
 	/* Check Capabilities */
-	if (reply.capabilities != sp->sv_capabilities) {
-		SMBERROR("Server capabilities do not match \n");
+	if (reply.capabilities != sp->sv_saved_capabilities) {
+		SMBERROR("Server capabilities do not match (0x%x, 0x%x)\n",
+                 reply.capabilities,
+                 sp->sv_saved_capabilities);
 		error = EAUTH;
         goto bad;
 	}
