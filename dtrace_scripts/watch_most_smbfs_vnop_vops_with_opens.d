@@ -3,7 +3,7 @@
 
 BEGIN
 {
-	printf("Watching all smbfs_vnop/vops - ^C to quit ...\n");
+	printf("Watching most smbfs_vnop/vops + opens - ^C to quit ...\n");
 }
 
 fbt:com.apple.filesystems.smbfs:smbfs_mount:entry
@@ -125,13 +125,17 @@ fbt:com.apple.filesystems.smbfs:smbfs_sync_callback:return
 
 
 
+
+
+
 fbt:com.apple.filesystems.smbfs:smbfs_vnop_close:entry
 { 
     self->vnop_close_arg0 = arg0;
 
-    printf("proc <%s> name <%s> ",
+    printf("proc <%s> name <%s> a_fflag <0x%x> ",
     	   execname,
-    	   stringof(((struct vnop_close_args *) arg0)->a_vp->v_name)
+    	   stringof(((struct vnop_close_args *) arg0)->a_vp->v_name),
+    	   ((struct vnop_close_args *) arg0)->a_fflag
            );
 	//ustack(15); 
 }
@@ -684,421 +688,92 @@ fbt:com.apple.filesystems.smbfs:smbfs_vnop_fsync:return
 	//stack();
 }
 
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_advlock:entry
-{ 
-    self->vnop_advlock_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_advlock_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_advlock:return
-/self->vnop_advlock_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_advlock_args *) self->vnop_advlock_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_advlock_arg0 = 0;
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_pagein:entry
-{ 
-    self->vnop_pagein_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_pagein_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_pagein:return
-/self->vnop_pagein_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_pagein_args *) self->vnop_pagein_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_pagein_arg0 = 0;
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_pageout:entry
-{ 
-    self->vnop_pageout_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_pageout_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_pageout:return
-/self->vnop_pageout_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_pageout_args *) self->vnop_pageout_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_pageout_arg0 = 0;
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_inactive:entry
-{ 
-    self->vnop_inactive_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_inactive_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_inactive:return
-/self->vnop_inactive_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_inactive_args *) self->vnop_inactive_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_inactive_arg0 = 0;
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_ioctl:entry
-{ 
-    self->vnop_ioctl_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_ioctl_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_ioctl:return
-/self->vnop_ioctl_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_ioctl_args *) self->vnop_ioctl_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_ioctl_arg0 = 0;
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_mkdir:entry
-{ 
-    self->vnop_mkdir_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_mkdir_args *) arg0)->a_dvp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_mkdir:return
-/self->vnop_mkdir_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_mkdir_args *) self->vnop_mkdir_arg0)->a_dvp->v_name),
-        arg1
-    );
-
-	self->vnop_mkdir_arg0 = 0;
-}
-
 fbt:com.apple.filesystems.smbfs:smbfs_vnop_mmap:entry
-{ 
-    self->vnop_mmap_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_mmap_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
+{
+	/* Save vnop_mmap_args arg */
+	self->vnop_mmap_arg0 = arg0;
 }
 
 fbt:com.apple.filesystems.smbfs:smbfs_vnop_mmap:return
 /self->vnop_mmap_arg0/
 {
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_mmap_args *) self->vnop_mmap_arg0)->a_vp->v_name),
-        arg1
-    );
+	printf("proc <%s> name <%s> error <%d> ",
+		execname,
+		stringof(((struct vnop_mmap_args *) self->vnop_mmap_arg0)->a_vp->v_name),
+		arg1
+	);
 
 	self->vnop_mmap_arg0 = 0;
+
+	//stack();
 }
 
 fbt:com.apple.filesystems.smbfs:smbfs_vnop_mnomap:entry
-{ 
-    self->vnop_mnomap_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_mnomap_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
+{
+	/* Save vnop_mnomap_args arg */
+	self->vnop_mnomap_arg0 = arg0;
 }
 
 fbt:com.apple.filesystems.smbfs:smbfs_vnop_mnomap:return
 /self->vnop_mnomap_arg0/
 {
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_mnomap_args *) self->vnop_mnomap_arg0)->a_vp->v_name),
-        arg1
-    );
+	printf("proc <%s> name <%s> error <%d> ",
+		execname,
+		stringof(((struct vnop_mnomap_args *) self->vnop_mnomap_arg0)->a_vp->v_name),
+		arg1
+	);
 
 	self->vnop_mnomap_arg0 = 0;
+
+	//stack();
 }
 
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_pathconf:entry
-{ 
-    self->vnop_pathconf_arg0 = arg0;
-
-    printf("proc <%s> ",
-    	   execname
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_pathconf:return
-/self->vnop_pathconf_arg0/
+fbt:com.apple.filesystems.smbfs:smbfs_vnop_mmap_check:entry
 {
-    printf("proc <%s> error <%d>",
-        execname,
-        arg1
-    );
-
-	self->vnop_pathconf_arg0 = 0;
+	/* Save vnop_mmap_check_args arg */
+	self->vnop_mmap_check_arg0 = arg0;
 }
 
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_copyfile:entry
-{ 
-    self->vnop_copyfile_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_copyfile_args *) arg0)->a_fvp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_copyfile:return
-/self->vnop_copyfile_arg0/
+fbt:com.apple.filesystems.smbfs:smbfs_vnop_mmap_check:return
+/self->vnop_mmap_check_arg0/
 {
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_copyfile_args *) self->vnop_copyfile_arg0)->a_fvp->v_name),
-        arg1
-    );
+	printf("proc <%s> name <%s> error <%d> ",
+		execname,
+		stringof(((struct vnop_mmap_check_args *) self->vnop_mmap_check_arg0)->a_vp->v_name),
+		arg1
+	);
 
-	self->vnop_copyfile_arg0 = 0;
-}
+	self->vnop_mmap_check_arg0 = 0;
 
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_read:entry
-{ 
-    self->vnop_read_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_read_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_read:return
-/self->vnop_read_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_read_args *) self->vnop_read_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_read_arg0 = 0;
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_write:entry
-{ 
-    self->vnop_write_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_write_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_write:return
-/self->vnop_write_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_write_args *) self->vnop_write_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_write_arg0 = 0;
+	//stack();
 }
 
 fbt:com.apple.filesystems.smbfs:smbfs_vnop_strategy:entry
-{ 
-    self->vnop_strategy_arg0 = arg0;
-
-    printf("proc <%s> ",
-    	   execname
-           );
-	//ustack(15); 
+{
+	/* Save vnop_strategy_args arg */
+	self->vnop_strategy_arg0 = arg0;
+	self->bp = ((struct vnop_strategy_args *) self->vnop_strategy_arg0)->a_bp;
+	
+	printf("proc <%s> name <%s> ",
+		execname,
+		stringof(((struct buf *) self->bp)->b_vp->v_name)
+	);
+	
+	self->bp = 0;	
 }
 
 fbt:com.apple.filesystems.smbfs:smbfs_vnop_strategy:return
 /self->vnop_strategy_arg0/
-{
-    printf("proc <%s> error <%d>",
-        execname,
-        arg1
-    );
+{	
+	printf("proc <%s> error <%d> ",
+		execname,
+		arg1
+	);
 
 	self->vnop_strategy_arg0 = 0;
+
+	//stack();
 }
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_readlink:entry
-{ 
-    self->vnop_readlink_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_readlink_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_readlink:return
-/self->vnop_readlink_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_readlink_args *) self->vnop_readlink_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_readlink_arg0 = 0;
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_reclaim:entry
-{ 
-    self->vnop_reclaim_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_reclaim_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_reclaim:return
-/self->vnop_reclaim_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_reclaim_args *) self->vnop_reclaim_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_reclaim_arg0 = 0;
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_symlink:entry
-{ 
-    self->vnop_symlink_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_symlink_args *) arg0)->a_dvp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_symlink:return
-/self->vnop_symlink_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_symlink_args *) self->vnop_symlink_arg0)->a_dvp->v_name),
-        arg1
-    );
-
-	self->vnop_symlink_arg0 = 0;
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_monitor:entry
-{ 
-    self->vnop_monitor_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_monitor_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_monitor:return
-/self->vnop_monitor_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_monitor_args *) self->vnop_monitor_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_monitor_arg0 = 0;
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_allocate:entry
-{ 
-    self->vnop_allocate_arg0 = arg0;
-
-    printf("proc <%s> name <%s> ",
-    	   execname,
-    	   stringof(((struct vnop_allocate_args *) arg0)->a_vp->v_name)
-           );
-	//ustack(15); 
-}
-
-fbt:com.apple.filesystems.smbfs:smbfs_vnop_allocate:return
-/self->vnop_allocate_arg0/
-{
-    printf("proc <%s> name <%s> error <%d>",
-        execname,
-        stringof(((struct vnop_allocate_args *) self->vnop_allocate_arg0)->a_vp->v_name),
-        arg1
-    );
-
-	self->vnop_allocate_arg0 = 0;
-}
-
-
-
-
-
-
 
 
 fbt:com.apple.filesystems.smbfs:smbfs_getattr:entry
@@ -1185,7 +860,7 @@ fbt:com.apple.filesystems.smbfs:smbfs_lookup:return
     );
 }
 
-fbt:com.apple.filesystems.smbfs:smbfs_smb_qstreaminfo:entry
+fbt:com.apple.filesystems.smbfs:smb2fs_smb_qstreaminfo:entry
 { 
     printf("proc <%s> name <%s> ",
     	   execname,
@@ -1194,7 +869,7 @@ fbt:com.apple.filesystems.smbfs:smbfs_smb_qstreaminfo:entry
 	//stack(15); 
 }
 
-fbt:com.apple.filesystems.smbfs:smbfs_smb_qstreaminfo:return
+fbt:com.apple.filesystems.smbfs:smb2fs_smb_qstreaminfo:return
 { 
     printf("proc <%s> error <%d> ",
     	   execname,
@@ -1202,6 +877,29 @@ fbt:com.apple.filesystems.smbfs:smbfs_smb_qstreaminfo:return
            );
 	//stack(15); 
 }
+
+fbt:mach_kernel:open:entry
+{
+    printf("proc <%s> path <%s> flags <0x%x> mode <0x%x>",
+    	execname,
+    	copyinstr(((struct open_args *) arg1)->path),
+    	((struct open_args *) arg1)->flags,
+    	((struct open_args *) arg1)->mode
+    	);
+	//ustack(15);
+}
+
+fbt:mach_kernel:open_extended:entry
+{
+    printf("proc <%s> path <%s> flags <0x%x> mode <0x%x>",
+    execname,
+    	copyinstr(((struct open_extended_args *) arg1)->path),
+    	((struct open_extended_args *) arg1)->flags,
+    	((struct open_extended_args *) arg1)->mode
+    	);
+    //ustack(15);
+}
+
 
 
 

@@ -1057,12 +1057,8 @@ smbfs_close(struct smb_share *share, vnode_t vp, int openMode,
 
                 smbnode_dur_handle_unlock(&temp_dur_hndl);
 
-                /* We are downgrading the open, flush out any data */
-                SMB_LOG_UBC_LOCK(np, "UBC_PUSHDIRTY, UBC_INVALIDATE on <%s> due to downgrading open\n",
-                                 np->n_name);
-                
-                np->n_flag &= ~(NNEEDS_UBC_INVALIDATE | NNEEDS_UBC_PUSHDIRTY);
-                ubc_msync(vp, 0, ubc_getsize(vp), NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+                /* We are downgrading the open, flush out data if necessary */
+                smbfs_check_for_ubc_invalidate(vp, "smbfs_close");
                 
                 /*
                  * Close the shared file first and use this new one now
@@ -3472,7 +3468,10 @@ smbfs_vnop_mmap(struct vnop_mmap_args *ap)
 	np = VTOSMB(vp);
 	np->n_lastvop = smbfs_vnop_mmap;	
 
-	/* We already have it mapped, just ignore this one */
+    SMB_LOG_FILE_OPS_LOCK(np, "n_flag <0x%x> on %s \n",
+                          np->n_flag, np->n_name);
+
+    /* We already have it mapped, just ignore this one */
     if (np->n_flag & NISMAPPED) {
 	    goto out;
     }
@@ -3544,6 +3543,9 @@ smbfs_vnop_mmap(struct vnop_mmap_args *ap)
     
     /* Mark that the file is mmapped now */
 	np->n_flag |= NISMAPPED;
+
+    SMB_LOG_FILE_OPS_LOCK(np, "Setting NISMAPPED (0x%x) in n_flag <0x%x> on %s \n",
+                          NISMAPPED, np->n_flag, np->n_name);
 
 out:
 	smbnode_unlock(np);
@@ -3673,10 +3675,13 @@ smbfs_vnop_mnomap(struct vnop_mnomap_args *ap)
     
     smb_share_rele(share, ap->a_context);
 
+out:
     /* We only get one mnomap, so clear the flag */
     np->n_flag &= ~NISMAPPED;
 
-out:
+    SMB_LOG_FILE_OPS_LOCK(np, "Cleared NISMAPPED (0x%x) in n_flag <0x%x> on %s \n",
+                          NISMAPPED, np->n_flag, np->n_name);
+
 	smbnode_unlock(np);
 
     SMB_LOG_KTRACE(SMB_DBG_MNOMAP | DBG_FUNC_END, error, 0, 0, 0, 0);
@@ -6150,7 +6155,7 @@ smbfs_vnop_strategy(struct vnop_strategy_args *ap)
          * out the data and thats when we end up here.
          */
         SMBERROR_LOCK(np, "%s has no file refs\n", np->n_name);
-        error = EIO;
+        error = ENXIO;
 		buf_seterror(bp, error);
         goto exit;
     }
@@ -9758,6 +9763,10 @@ static int32_t smbfs_vnop_ioctl(struct vnop_ioctl_args *ap)
             else {
                 if (smbfsIsCacheable(vp)) {
                     pb->file.flags |= SMB_FILE_UBC_CACHING;
+                }
+                
+                if (np->n_flag & NISMAPPED) {
+                    pb->file.flags |= SMB_FILE_MMAPPED;
                 }
                 
                 /* Fill in sharedFID info */
