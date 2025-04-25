@@ -68,6 +68,8 @@
 #include <netsmb/smb_tran.h>
 #include <netsmb/smb2_mc_support.h>
 
+#include <iokit/smbfs_iokit.h>
+
 /*
  * Userland code loops through minor #s 0 to 1023, looking for one which opens.
  * Intially we create minor 0 and leave it for anyone.  Minor zero will never
@@ -77,7 +79,12 @@
 #define SMBMINORS 1024
 struct smb_dev * smb_dtab[SMBMINORS];
 int smb_minor_hiwat = -1;
-#define SMB_GETDEV(dev)         (smb_dtab[minor(dev)])
+#define SMB_GETDEV(dev)         (minor(dev) >= SMBMINORS? NULL: (smb_dtab[minor(dev)]))
+#define SMB_SETDEV(dev, sdp) \
+do { \
+    if (minor(dev) < SMBMINORS) \
+           smb_dtab[minor(dev)] = sdp; \
+} while (0)
 
 static d_open_t	 nsmb_dev_open;
 static d_close_t nsmb_dev_close;
@@ -148,7 +155,7 @@ nsmb_dev_open_nolock(dev_t dev, int oflags, int devtype, struct proc *p)
 		}
 		if (avail_minor > smb_minor_hiwat)
 			smb_minor_hiwat = avail_minor;
-		SMB_GETDEV(dev) = sdp;
+        SMB_SETDEV(dev, sdp);
 		return (EBUSY);
 	}
 	lck_rw_init(&sdp->sd_rwlock, dev_lck_grp, dev_lck_attr);
@@ -222,7 +229,7 @@ nsmb_dev_close(dev_t dev, int flag, int fmt, struct proc *p)
 
 	vfs_context_rele(context);
 
-	SMB_GETDEV(dev) = NULL;
+    SMB_SETDEV(dev, NULL);
 	lck_rw_destroy(&sdp->sd_rwlock, dev_lck_grp);
     SMB_FREE_TYPE(struct smb_dev, sdp);
 	dev_open_cnt--;
@@ -234,7 +241,7 @@ nsmb_dev_close(dev_t dev, int flag, int fmt, struct proc *p)
 static int nsmb_dev_ioctl(dev_t dev, u_long cmd, caddr_t data, int flag, 
 						  struct proc *p)
 {
-#pragma unused(flag, p)
+#pragma unused(flag)
 	struct smb_dev *sdp;
 	struct smb_session *sessionp;
 	struct smb_share *sharep;
@@ -390,6 +397,13 @@ ioc_negotiate_error:
         case SMBIOC_UPDATE_NOTIFIER_PID:
         {
             SMBDEBUG("SMBIOC_UPDATE_NOTIFIER_PID received.\n");
+            if (!smbfs_is_task_entitled_to(proc_task(p), SMBIOC_UPDATE_NOTIFITER_PID_ENTITLEMENT)) {
+                lck_rw_unlock_shared(dev_rw_lck);
+                SMBERROR("SMBIOC_UPDATE_NOTIFIER_PID needs entitlement");
+                error = EPERM;
+                break;
+            }
+
             lck_rw_lock_shared(&sdp->sd_rwlock);
 
             /* free global lock now since we now have sd_rwlock */
@@ -1838,7 +1852,7 @@ static int nsmb_dev_load(module_t mod, int cmd, void *arg)
 					(void)smb_sm_done();	
 				}
 				smb_minor_hiwat = 0;
-				SMB_GETDEV(dev) = sdp;
+                SMB_SETDEV(dev, sdp);
 			}
 			SMBDEBUG("netsmb_dev: loaded\n");
 			break;
@@ -1853,7 +1867,7 @@ static int nsmb_dev_load(module_t mod, int cmd, void *arg)
 
 				for (m = 0; m <= smb_minor_hiwat; m++)
 					if ((sdp = SMB_GETDEV(m))) {
-						SMB_GETDEV(m) = 0;
+                        SMB_SETDEV(m, NULL);
 						if (sdp->sd_devfs)
 							devfs_remove(sdp->sd_devfs);
 					}
@@ -1896,6 +1910,7 @@ smb_dev2share(int fd, struct smb_share **outShare)
 		sdp = SMB_GETDEV(dev);
 	}
 	if (sdp == NULL) {
+        SMBERROR("NULL sdp");
 		error = EBADF;
 		goto done;
 	}

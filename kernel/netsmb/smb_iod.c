@@ -87,7 +87,7 @@ int smb_iod_get_interface_info(struct smbiod *iod);
 static int smb_iod_main_ch_failover(struct smbiod *iod);
 static void smb_iod_alt_ch_failover(struct smbiod *iod);
 static int smb_iod_proclaim_main(struct smbiod *iod, struct smbiod *iod_main);
-static void smb_iod_read_thread(void *arg);
+static void smb_iod_read_thread(void *arg, wait_result_t wr);
 static void smb_iod_detach_con_entry(struct smbiod *iod);
 static void smb_iod_lease_dequeue(struct smbiod *iod);
 
@@ -3312,7 +3312,7 @@ static void smb_iod_reconnect(struct smbiod *iod)
     SMB_LOG_KTRACE(SMB_DBG_IOD_RECONNECT | DBG_FUNC_START,
                    iod->iod_id, 0, 0, 0, 0);
 
-    SMB_LOG_MC("id %d Starting reconnect with %s\n", iod->iod_id, sessionp->session_srvname);
+    SMBERROR("id %d Starting reconnect with %s\n", iod->iod_id, sessionp->session_srvname);
 	SMB_TRAN_DISCONNECT(iod); /* Make sure the connection is close first */
 	iod->iod_state = SMBIOD_ST_CONNECT;
 	
@@ -3474,7 +3474,7 @@ static void smb_iod_reconnect(struct smbiod *iod)
 						   iod->iod_id, sessionp->session_srvname, error);
 				break;				
 			} else {
-                SMB_LOG_MC("id %d The negotiate succeeded to %s\n",
+                SMBERROR("id %d The negotiate succeeded to %s\n",
                            iod->iod_id, sessionp->session_srvname);
 				iod->iod_state = SMBIOD_ST_NEGOACTIVE;
 				/*
@@ -3751,7 +3751,7 @@ exit:
 	}
     else {
         /* Reconnect worked, its now safe to start up crediting again */
-        SMB_LOG_MC("id %d: Reconnect completed successfully. \n", iod->iod_id);
+        SMBERROR("id %d: Reconnect completed successfully. \n", iod->iod_id);
         smb2_rq_credit_start(iod, 0);
 		smb_reconn_stats.success_cnt += 1;
     }
@@ -3874,7 +3874,7 @@ smb_iod_main(struct smbiod *iod)
 	return;
 }
 
-static void smb_iod_thread(void *arg)
+static void smb_iod_thread(void *arg, __unused wait_result_t wr)
 {
 	struct smbiod *iod = arg;
     struct smb_session *sessionp = iod->iod_session;
@@ -4084,7 +4084,7 @@ smb_iod_lease_enqueue(struct smbiod *received_iod,
 }
 
 static void
-smb_iod_read_thread(void *arg)
+smb_iod_read_thread(void *arg, __unused wait_result_t wr)
 {
     struct smbiod *iod = arg;
 
