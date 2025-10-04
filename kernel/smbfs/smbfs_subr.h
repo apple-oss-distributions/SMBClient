@@ -163,7 +163,7 @@ struct smbfs_fctx_query_t{
     struct smb_rq   *create_rqp;
     struct smb_rq   *query_rqp;
     uint32_t        output_buf_len;   /* bytes left in current response */
-    SLIST_ENTRY(smbfs_fctx_query_t) next;
+    STAILQ_ENTRY(smbfs_fctx_query_t) next;
 };
 
 struct smbfs_fctx {
@@ -197,7 +197,7 @@ struct smbfs_fctx {
 	uint32_t	f_rnameofs;
 	int			f_rkey;		/* resume key */
     /* SMB 2/3 fields */
-    SLIST_HEAD(f_queries_head, smbfs_fctx_query_t) f_queries;
+    STAILQ_HEAD(f_queries_head, smbfs_fctx_query_t) f_queries;
     uint32_t    f_queries_total_memory;
     int         f_need_close;
     int         f_fid_closed;
@@ -376,5 +376,7 @@ int smb1fs_smb_ntcreatex(struct smb_share *share, struct smbnode *dnp_or_np,
                          struct smbfattr *fap, int do_create, 
                          vfs_context_t context);
 int smbfs_is_dir(struct smbnode *np);
+
+boolean_t smbfs_inshutdown(void);
 
 #endif /* !_FS_SMBFS_SMBFS_SUBR_H_ */

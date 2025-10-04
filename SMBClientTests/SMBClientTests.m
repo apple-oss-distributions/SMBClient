@@ -17558,6 +17558,7 @@ done:
 
 
 char* dir25kName = "static-25k_dirs";
+#define STATIC_25K_DIR_SIZE 25000
 /*
  * Note: this test takes a long time
  * this can be reduced by lowering entry_cnt
@@ -17570,7 +17571,7 @@ char* dir25kName = "static-25k_dirs";
     struct dirent *dp = NULL;
     DIR * dirp = NULL;
     char dir_path[PATH_MAX];
-    uint32_t entry_cnt = 25000;
+    uint32_t entry_cnt = STATIC_25K_DIR_SIZE;
     uint8_t entries_arr[entry_cnt + 1];
     char *idx_ptr = NULL;
     memset(entries_arr, 0, sizeof(entries_arr));
@@ -17671,7 +17672,7 @@ error:
     char mp[PATH_MAX] = {0};
     DIR * dirp = NULL;
     char dir_path[PATH_MAX];
-    uint32_t entry_cnt = 25000;
+    uint32_t entry_cnt = STATIC_25K_DIR_SIZE;
     uint8_t entries_arr[entry_cnt];
     memset(entries_arr, 0, sizeof(entries_arr));
     int numReturnedBulk = 0;
@@ -17984,6 +17985,7 @@ done:
 
     int error = 0;
     char file_path[PATH_MAX] = {0};
+    char dir_path[PATH_MAX] = {0};
     char mp1[PATH_MAX] = {0};
     int options = 0;
     char name_buf[NAME_SIZE] = {0};
@@ -18155,6 +18157,18 @@ done:
     }
     fprintf(stdout, "getxattr() returned correct ERANGE when given too small of a buffer for resource fork \n");
 
+    /*
+     * Test with just right sized buffer with getxattr while reading from the middle
+     * Note: getxattr() can be called with offset != 0 for resource forks only
+     */
+    xa_size = getxattr(file_path, XATTR_RESOURCEFORK_NAME, recvbuf, (VALUE_SIZE)/2, VALUE_SIZE - (VALUE_SIZE)/2, options);
+    if (xa_size != VALUE_SIZE/2) {
+        XCTFail("getxattr(VALUE_SIZE/2) with just right buffer failed %zd, errno %d",
+                xa_size, errno);
+        goto done;
+    }
+    fprintf(stdout, "getxattr(VALUE_SIZE/2, offset!=0) worked with just right buffer size \n");
+
     
     /* Test with just right sized buffer with listxattr */
     xa_size = listxattr(file_path, recvbuf, BUF_SIZE, options);
@@ -18258,7 +18272,67 @@ done:
                 file_path, strerror(errno), errno);
         goto done;
     }
-    
+
+    /*
+     * Test xattrs on directories
+     */
+
+    /* Set up a directory path */
+    strlcpy(dir_path, mp1, sizeof(dir_path));
+    strlcat(dir_path, "/", sizeof(dir_path));
+    strlcat(dir_path, cur_test_dir, sizeof(dir_path));
+    strlcat(dir_path, "/", sizeof(dir_path));
+    strlcat(dir_path, "test_dir", sizeof(dir_path));
+
+    /* Create the directory */
+    printf("Creating dir \n");
+    error = mkdir(dir_path, S_IRWXU);
+    if (error) {
+        XCTFail("mkdir on <%s> failed %d:%s \n",
+                dir_path, errno, strerror(errno));
+        goto done;
+    }
+
+    error = setxattr(dir_path, "test_xattr", kXattrData,
+                     sizeof(kXattrData), 0, XATTR_NOFOLLOW);
+    if (error) {
+        XCTFail("setxattr on <%s> failed %d:%s \n", dir_path,
+                errno, strerror(errno));
+        error = errno;
+        goto done;
+    }
+
+    xa_size = listxattr(dir_path, recvbuf, BUF_SIZE, options);
+    if (xa_size != (strlen("test_xattr") + 1)) {
+        XCTFail("listxattr() with failed %zd, errno %d\n",
+                xa_size, errno);
+        goto done;
+    }
+    fprintf(stdout, "listxattr() worked\n");
+
+    /* Test with just right sized buffer with getxattr */
+    xa_size = getxattr(dir_path, "test_xattr", recvbuf, sizeof(kXattrData), 0, options);
+    if (xa_size != sizeof(kXattrData)) {
+        XCTFail("getxattr() with just right buffer failed %zd, errno %d \n",
+                xa_size, errno);
+        goto done;
+    }
+    fprintf(stdout, "getxattr() worked with just right buffer size \n");
+
+    error = removexattr(dir_path, "test_xattr", options);
+    if (error == -1) {
+        XCTFail("removexattr() failed %d for %s \n", errno, dir_path);
+        goto done;
+    }
+    fprintf(stdout, "removexattr() worked for %s \n", dir_path);
+
+    error = rmdir(dir_path);
+    if (error) {
+        XCTFail("rmdir on <%s> failed %d:%s \n",
+                dir_path, errno, strerror(errno));
+        goto done;
+    }
+
     /*
      * If no errors, attempt to delete test dirs. This could fail if a
      * previous test failed and thats fine.
@@ -18273,6 +18347,409 @@ done:
     rmdir(mp1);
 }
 
+-(void)testMultipleEnum
+{
+    int error = 0;
+    char mp[PATH_MAX] = {0};
+    DIR * dirp1 = NULL, *dirp2 = NULL;
+    char dir_path[PATH_MAX];
+    uint32_t entry_cnt = STATIC_25K_DIR_SIZE;
+    uint8_t entries_arr[entry_cnt];
+    memset(entries_arr, 0, sizeof(entries_arr));
+    int numReturnedBulk = 0;
+    int total_returned1 = 0,total_returned2;
+    int dirBulkReplySize = 0;
+    char *dirBulkReplyPtr = NULL;
+    attribute_set_t req_attrs = {0};
+    time_t current_time = 0;
+    char *time_str;
+    double granularity = 0.15;
+    int mid_point = 0;
+
+    if (list_tests_with_mdata == 1) {
+        do_list_test_meta_data("Test for correct getAttrListBulk behavior",
+                               "opendir,closedir,getAttrListBulk",
+                               "1,2,3",
+                               NULL,
+                               NULL);
+        return;
+    }
+
+    /*
+     * We will need just one mount to start with
+     */
+    do_create_mount_path(mp, sizeof(mp), "testGetattrlistbulk");
+
+    error = mount_two_sessions(mp, NULL, 0);
+    if (error) {
+        XCTFail("mount_two_sessions failed %d \n", error);
+        goto error;
+    }
+
+    strlcpy(dir_path, mp, sizeof(dir_path));
+    strlcat(dir_path, "/", sizeof(dir_path));
+    strlcat(dir_path, dir25kName, sizeof(dir_path));
+
+    dirBulkReplySize = kEntriesPerCall * (sizeof(struct replyData)) + 1024;
+    dirBulkReplyPtr = malloc(dirBulkReplySize);
+    if (dirBulkReplyPtr == NULL) {
+        XCTFail("no memory");
+        goto error;
+    }
+
+    for (mid_point = 0; mid_point < entry_cnt; mid_point+=(entry_cnt*granularity)) {
+        if (gVerbose) {
+            printf("--------------------test with mid_point %d--------------------\n", mid_point);
+        }
+        /*
+         * get first enumeration to half way through
+         */
+        dirp1 = opendir(dir_path);
+        if (dirp1 == NULL) {
+            XCTFail("opendir on <%s> failed %d:%s \n",
+                    dir_path, errno, strerror(errno));
+            goto error;
+        }
+        
+        current_time = time(NULL);
+        time_str = ctime(&current_time);
+        time_str[strlen(time_str)-1] = '\0';
+        if (gVerbose) {
+            printf("Starting enumeration at: %s\n", time_str);
+        }
+        
+        total_returned1 = 0;
+        while ((total_returned1 < mid_point) && ((numReturnedBulk = getAttrListBulk(dirp1->__dd_fd, dirBulkReplySize,
+                                                                                      dirBulkReplyPtr, &req_attrs)) > 0)) {
+            total_returned1 += numReturnedBulk;
+            if (gVerbose) {
+                current_time = time(NULL);
+                char * time_str = ctime(&current_time);
+                time_str[strlen(time_str)-1] = '\0';
+                printf("Time: %s Got %d entries. Total %d\n",
+                       time_str, numReturnedBulk, total_returned1);
+            }
+        }
+        current_time = time(NULL);
+        time_str = ctime(&current_time);
+        time_str[strlen(time_str)-1] = '\0';
+        if (gVerbose) {
+            printf("paused enum1 at: %d\n", total_returned1);
+        }
+        if (numReturnedBulk < 0) {
+            XCTFail("getAttrListBulk returned %d \n", numReturnedBulk);
+            goto error;
+        }
+        
+        /*
+         start and finish second enumeration
+         */
+        dirp2 = opendir(dir_path);
+        if (dirp2 == NULL) {
+            XCTFail("opendir on <%s> failed %d:%s \n",
+                    dir_path, errno, strerror(errno));
+            goto error;
+        }
+        
+        current_time = time(NULL);
+        time_str = ctime(&current_time);
+        time_str[strlen(time_str)-1] = '\0';
+        if (gVerbose) {
+            printf("Starting enumeration at: %s\n", time_str);
+        }
+        
+        total_returned2 = 0;
+        while ((numReturnedBulk = getAttrListBulk(dirp2->__dd_fd, dirBulkReplySize,
+                                                  dirBulkReplyPtr, &req_attrs)) > 0) {
+            total_returned2 += numReturnedBulk;
+            if (gVerbose) {
+                current_time = time(NULL);
+                char * time_str = ctime(&current_time);
+                time_str[strlen(time_str)-1] = '\0';
+                printf("Time: %s Got %d entries. Total %d\n",
+                       time_str, numReturnedBulk, total_returned2);
+            }
+        }
+        current_time = time(NULL);
+        time_str = ctime(&current_time);
+        time_str[strlen(time_str)-1] = '\0';
+        if (gVerbose) {
+            printf("Finished enumeration2 at: %s\n", time_str);
+        }
+        if (numReturnedBulk < 0) {
+            XCTFail("getAttrListBulk returned %d \n", numReturnedBulk);
+            goto error;
+        }
+        if (total_returned2 != entry_cnt) {
+            XCTFail("enum2 getAttrListBulk returned %d != entry_cnt %d", total_returned2, entry_cnt);
+            goto error;
+        }
+        
+        /*
+         * now finish the first enumeration
+         */
+        if (gVerbose) {
+            printf("continue enum1 at: %s\n", time_str);
+        }
+        
+        while ((numReturnedBulk = getAttrListBulk(dirp1->__dd_fd, dirBulkReplySize,
+                                                  dirBulkReplyPtr, &req_attrs)) > 0) {
+            total_returned1 += numReturnedBulk;
+            if (gVerbose) {
+                current_time = time(NULL);
+                char * time_str = ctime(&current_time);
+                time_str[strlen(time_str)-1] = '\0';
+                printf("Time: %s Got %d entries. Total %d\n",
+                       time_str, numReturnedBulk, total_returned1);
+
+            }
+        }
+        if (gVerbose) {
+            printf("Finished enumeration1 at: %s\n", time_str);
+        }
+        if (numReturnedBulk < 0) {
+            XCTFail("getAttrListBulk returned %d \n", numReturnedBulk);
+            goto error;
+        }
+        if (total_returned1 != entry_cnt) {
+            XCTFail("enum1 getAttrListBulk returned %d != entry_cnt %d", total_returned1, entry_cnt);
+            goto error;
+        }
+        closedir(dirp1);
+        dirp1 = NULL;
+        closedir(dirp2);
+        dirp2 = NULL;
+    }
+error:
+    if (dirBulkReplyPtr) {
+        free(dirBulkReplyPtr);
+    }
+
+    if (dirp1 != NULL) {
+        closedir(dirp1);
+    }
+    if (dirp2 != NULL) {
+        closedir(dirp2);
+    }
+    if (unmount(mp, MNT_FORCE) == -1) {
+        XCTFail("unmount failed for first url %d\n", errno);
+    }
+
+    rmdir(mp);
+}
+
+/*
+ * The next 6 tests are really one test but since it takes a lot of time
+ * we split it into multiple tests, all calling CheckAlternatingEnumWithDiff
+ * with a diff we want to test
+ */
+-(void) CheckAlternatingEnumWithDiff: (int)diff
+{
+    DIR *dirp1 = NULL, *dirp2 = NULL;
+    char dir_path[PATH_MAX];
+    uint32_t entry_cnt = STATIC_25K_DIR_SIZE;
+    int numReturnedBulk = 0;
+    int total_returned1 = 0, total_returned2 = 0;
+    int dirBulkReplySize = 0;
+    char *dirBulkReplyPtr = NULL;
+    attribute_set_t req_attrs = {0};
+    time_t current_time = 0;
+    char *time_str;
+    int enum1_done = 0, enum2_done = 0;
+    int error = 0;
+    char mp[PATH_MAX] = {0};
+
+    if (list_tests_with_mdata == 1) {
+        do_list_test_meta_data("Test for correct getAttrListBulk behavior",
+                               "opendir,closedir,getAttrListBulk",
+                               "1,2,3",
+                               NULL,
+                               NULL);
+        return;
+    }
+
+    /*
+     * We will need just one mount to start with
+     */
+    do_create_mount_path(mp, sizeof(mp), "testAlternateEnum");
+    error = mount_two_sessions(mp, NULL, 0);
+    if (error) {
+        XCTFail("mount_two_sessions failed %d \n", error);
+        return;
+    }
+
+    strlcpy(dir_path, mp, sizeof(dir_path));
+    strlcat(dir_path, "/", sizeof(dir_path));
+    strlcat(dir_path, dir25kName, sizeof(dir_path));
+    
+    dirBulkReplySize = kEntriesPerCall * (sizeof(struct replyData)) + 1024;
+    dirBulkReplyPtr = malloc(dirBulkReplySize);
+    if (dirBulkReplyPtr == NULL) {
+        XCTFail("no memory");
+        goto error;
+    }
+    
+    if (gVerbose) {
+        printf("--------------------test with diff %d--------------------\n", diff);
+    }
+    total_returned1 = total_returned2 = enum1_done = enum2_done = 0;
+    /*
+     * get first enumeration to the desired diff
+     */
+    dirp1 = opendir(dir_path);
+    if (dirp1 == NULL) {
+        XCTFail("opendir on <%s> failed %d:%s \n",
+                dir_path, errno, strerror(errno));
+        goto error;
+    }
+    
+    current_time = time(NULL);
+    time_str = ctime(&current_time);
+    time_str[strlen(time_str)-1] = '\0';
+    if (gVerbose) {
+        printf("Starting enum1 at: %s\n", time_str);
+    }
+    
+    total_returned1 = 0;
+    while ((total_returned1 < diff) && ((numReturnedBulk = getAttrListBulk(dirp1->__dd_fd, dirBulkReplySize,
+                                                                                dirBulkReplyPtr, &req_attrs)) > 0)) {
+        total_returned1 += numReturnedBulk;
+        if (gVerbose) {
+            current_time = time(NULL);
+            char * time_str = ctime(&current_time);
+            time_str[strlen(time_str)-1] = '\0';
+            printf("enum1 Time: %s Got %d entries. Total %d\n",
+                   time_str, numReturnedBulk, total_returned1);
+        }
+    }
+    if (numReturnedBulk < 0) {
+        XCTFail("getAttrListBulk returned %d \n", numReturnedBulk);
+        goto error;
+    }
+    if (total_returned1 < diff) {
+        XCTFail("enum1 getAttrListBulk returned too few entries %d, expected %d \n", total_returned1, diff);
+    }
+    
+    /*
+     * open the directory again
+     */
+    dirp2 = opendir(dir_path);
+    if (dirp2 == NULL) {
+        XCTFail("opendir on <%s> failed %d:%s \n",
+                dir_path, errno, strerror(errno));
+        goto error;
+    }
+    
+    /*
+     * call getattrlistbulk while alternating dirp1 and dirp2 until finished
+     * ideally we want to let the enumeration finish but check (total_returned <= entry_cnt)
+     * to protect us from an infinite loop (if getattrlistbulk is very messed up)
+     * and we will fail the test if total_returned > entry_cnt anyway
+     */
+    while ((!enum1_done || !enum2_done) && (total_returned1 <= entry_cnt) && (total_returned2 <= entry_cnt)) {
+        if (!enum2_done) {
+            numReturnedBulk = getAttrListBulk(dirp2->__dd_fd, dirBulkReplySize, dirBulkReplyPtr, &req_attrs);
+            if (numReturnedBulk < 0) {
+                XCTFail("enum2 getAttrListBulk returned %d \n", numReturnedBulk);
+                goto error;
+            } else if (numReturnedBulk == 0) {
+                enum2_done = 1;
+            }
+            total_returned2 += numReturnedBulk;
+            if (gVerbose) {
+                current_time = time(NULL);
+                char * time_str = ctime(&current_time);
+                time_str[strlen(time_str)-1] = '\0';
+                printf("enum2 Time: %s Got %d entries. Total %d.\n",
+                       time_str, numReturnedBulk, total_returned2);
+            }
+        }
+        if (!enum1_done) {
+            numReturnedBulk = getAttrListBulk(dirp1->__dd_fd, dirBulkReplySize, dirBulkReplyPtr, &req_attrs);
+            if (numReturnedBulk < 0) {
+                XCTFail("enum1 getAttrListBulk returned %d \n", numReturnedBulk);
+                goto error;
+            } else if (numReturnedBulk == 0) {
+                enum1_done = 1;
+            }
+            total_returned1 += numReturnedBulk;
+            if (gVerbose) {
+                current_time = time(NULL);
+                char * time_str = ctime(&current_time);
+                time_str[strlen(time_str)-1] = '\0';
+                printf("enum1 Time: %s Got %d entries. Total %d.\n",
+                       time_str, numReturnedBulk, total_returned1);
+            }
+        }
+    }
+    /*
+     * at this point both enumeration should be done and enumerated total_returned == entry_cnt
+     */
+    if (total_returned1 != entry_cnt) {
+        XCTFail("enum1 returned %d entries, expected %d", total_returned1, entry_cnt);
+        goto error;
+    }
+    if (total_returned2 != entry_cnt) {
+        XCTFail("enum2 returned %d entries, expected %d", total_returned2, entry_cnt);
+        goto error;
+    }
+    closedir(dirp1);
+    dirp1 = NULL;
+    closedir(dirp2);
+    dirp2 = NULL;
+
+error:
+    if (dirBulkReplyPtr) {
+        free(dirBulkReplyPtr);
+    }
+
+    if (dirp1 != NULL) {
+        closedir(dirp1);
+    }
+    if (dirp2 != NULL) {
+        closedir(dirp2);
+    }
+
+    if (unmount(mp, MNT_FORCE) == -1) {
+        XCTFail("unmount failed for first url %d\n", errno);
+    }
+    rmdir(mp);
+}
+
+static int diffsToTest[] = {500 ,3750, 7500, 11250, 15000, 18750, 22500};
+-(void)testAlternatingEnum0
+{
+    [self CheckAlternatingEnumWithDiff: diffsToTest[0]];
+}
+
+-(void)testAlternatingEnum1
+{
+    [self CheckAlternatingEnumWithDiff: diffsToTest[1]];
+}
+
+-(void)testAlternatingEnum2
+{
+    [self CheckAlternatingEnumWithDiff: diffsToTest[2]];
+}
+
+-(void)testAlternatingEnum3
+{
+    [self CheckAlternatingEnumWithDiff: diffsToTest[3]];
+}
+
+-(void)testAlternatingEnum4
+{
+    [self CheckAlternatingEnumWithDiff: diffsToTest[4]];
+}
+
+-(void)testAlternatingEnum5
+{
+    [self CheckAlternatingEnumWithDiff: diffsToTest[5]];
+}
+
+-(void)testAlternatingEnum6
+{
+    [self CheckAlternatingEnumWithDiff: diffsToTest[6]];
+}
 
 @end
-

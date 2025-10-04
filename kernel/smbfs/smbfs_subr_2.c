@@ -841,6 +841,8 @@ smb_dir_cache_remove(vnode_t dvp, void *in_cachep,
 
     if (partial_remove) {
         remove_count = offset - cachep->start_offset;
+        SMB_LOG_DIR_CACHE_LOCK(dnp, "Partial cache remove for <%s> cachep->start_offset:<%lld> offset:<%lld>\n",
+                               dnp->n_name, cachep->start_offset, offset);
     }
 
     while (entryp != NULL) {
@@ -863,6 +865,7 @@ smb_dir_cache_remove(vnode_t dvp, void *in_cachep,
         cachep->list = entryp;
     } else {
         cachep->offset = 0;
+        cachep->start_offset = 0;
         cachep->count = 0;
         cachep->list = NULL;
     }
@@ -1662,6 +1665,10 @@ smb2fs_fullpath(struct mbchain *mbp, struct smbnode *dnp,
 	}
     
 	if (name) {
+        if (name_len > (SMB_MAXFNAMELEN * 2)) {
+            SMBERROR("%s: Illegal name len %zu\n", __FUNCTION__, name_len);
+            return EINVAL;
+        }
         /* Add separator char only if we added a path from above */
         if (len > 0) {
             error = mb_put_uint16le(mbp, sep_char);
@@ -1678,6 +1685,10 @@ smb2fs_fullpath(struct mbchain *mbp, struct smbnode *dnp,
     
     /* Add Stream Name */
 	if (strm_name) {
+        if (strm_name_len > (SMB_MAXFNAMELEN * 2)) {
+            SMBERROR("%s: Illegal stream len %zu\n", __FUNCTION__ , strm_name_len);
+            return EINVAL;
+        }
         /* Add separator char */
         error = mb_put_uint16le(mbp, stream_sep_char);
         if (error) {
